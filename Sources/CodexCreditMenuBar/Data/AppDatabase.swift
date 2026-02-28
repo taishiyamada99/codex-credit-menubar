@@ -6,6 +6,9 @@ private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.sel
 actor AppDatabase {
     private var db: OpaquePointer?
     private let dbURL: URL
+    private var diagnosticInsertCountSincePrune = 0
+    private let maxDiagnosticRows = 2_000
+    private let diagnosticPruneInterval = 50
 
     init() {
         let fileManager = FileManager.default
@@ -261,6 +264,12 @@ actor AppDatabase {
         bindText(statement, index: 3, value: message)
         sqlite3_bind_int64(statement, 4, Int64(Date().timeIntervalSince1970))
         _ = sqlite3_step(statement)
+
+        diagnosticInsertCountSincePrune += 1
+        if diagnosticInsertCountSincePrune >= diagnosticPruneInterval {
+            diagnosticInsertCountSincePrune = 0
+            pruneDiagnostics(maxRows: maxDiagnosticRows)
+        }
     }
 
     func fetchDiagnostics(limit: Int = 200) -> [DiagnosticEvent] {
@@ -391,6 +400,24 @@ actor AppDatabase {
         bindText(statement, index: 1, value: key)
         bindText(statement, index: 2, value: value)
         sqlite3_bind_int64(statement, 3, Int64(Date().timeIntervalSince1970))
+        _ = sqlite3_step(statement)
+    }
+
+    private func pruneDiagnostics(maxRows: Int) {
+        let sql = """
+        DELETE FROM diagnostic_events
+        WHERE id NOT IN (
+            SELECT id
+            FROM diagnostic_events
+            ORDER BY id DESC
+            LIMIT ?
+        );
+        """
+        guard let statement = prepare(sql: sql) else {
+            return
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int(statement, 1, Int32(maxRows))
         _ = sqlite3_step(statement)
     }
 

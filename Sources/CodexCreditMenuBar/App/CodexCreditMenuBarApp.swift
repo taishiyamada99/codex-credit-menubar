@@ -8,12 +8,12 @@ struct CodexCreditMenuBarApp: App {
         MenuBarExtra {
             MenuContentView(viewModel: viewModel)
         } label: {
-            Text(viewModel.menuBarTitle())
+            MenuBarLabelView(viewModel: viewModel)
         }
 
         Settings {
             SettingsRootView(viewModel: viewModel)
-                .frame(minWidth: 760, minHeight: 560)
+                .frame(minWidth: 500, minHeight: 340)
         }
     }
 }

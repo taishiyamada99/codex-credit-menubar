@@ -30,6 +30,32 @@ final class ClassificationEngineTests: XCTestCase {
         XCTAssertEqual(engine.classify(bucket: bucket7d, rules: []), .sevenDay)
     }
 
+    func testWindowBasedClassificationAllowsNearValues() {
+        let near5h = LimitBucket(
+            limitId: "a",
+            limitName: "a",
+            usedPercent: 20,
+            remainingPercent: 80,
+            windowDurationMins: 299,
+            resetsAt: nil,
+            updatedAt: nil,
+            hasSecondary: false
+        )
+        let near7d = LimitBucket(
+            limitId: "b",
+            limitName: "b",
+            usedPercent: 20,
+            remainingPercent: 80,
+            windowDurationMins: 10_050,
+            resetsAt: nil,
+            updatedAt: nil,
+            hasSecondary: false
+        )
+
+        XCTAssertEqual(engine.classify(bucket: near5h, rules: []), .fiveHour)
+        XCTAssertEqual(engine.classify(bucket: near7d, rules: []), .sevenDay)
+    }
+
     func testNameBasedClassification() {
         let review = LimitBucket(
             limitId: "review_limit",
@@ -54,6 +80,20 @@ final class ClassificationEngineTests: XCTestCase {
 
         XCTAssertEqual(engine.classify(bucket: review, rules: []), .review)
         XCTAssertEqual(engine.classify(bucket: spark, rules: []), .gptSpark)
+    }
+
+    func testBengalfoxIdClassifiedAsSpark() {
+        let bucket = LimitBucket(
+            limitId: "codex_bengalfox",
+            limitName: "Internal",
+            usedPercent: 1,
+            remainingPercent: 99,
+            windowDurationMins: nil,
+            resetsAt: nil,
+            updatedAt: nil,
+            hasSecondary: false
+        )
+        XCTAssertEqual(engine.classify(bucket: bucket, rules: []), .gptSpark)
     }
 
     func testAliasRuleOverridesBuiltin() {

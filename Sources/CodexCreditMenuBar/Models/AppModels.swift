@@ -16,6 +16,19 @@ enum BucketKind: String, Codable, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    static let uiCases: [BucketKind] = [
+        .sevenDay,
+        .fiveHour,
+        .review,
+        .gptSpark
+    ]
+
+    static let fallbackCases: [BucketKind] = [
+        .sevenDay,
+        .fiveHour,
+        .gptSpark
+    ]
+
     var shortLabel: String {
         switch self {
         case .fiveHour:
@@ -86,7 +99,7 @@ struct LimitAliasRule: Codable, Identifiable, Hashable {
     }
 }
 
-struct AppSettings: Codable {
+struct AppSettings: Codable, Equatable {
     var sourceMode: SourceMode
     var customCodexPath: String
     var visibleKinds: [BucketKind]
@@ -107,7 +120,7 @@ struct AppSettings: Codable {
         sourceMode: .autoDesktopFirst,
         customCodexPath: "",
         visibleKinds: [.sevenDay],
-        inlineMaxCount: 2,
+        inlineMaxCount: 5,
         privacyMode: false,
         notificationsEnabled: true,
         thresholdPercents: [20, 10, 5],
@@ -182,4 +195,15 @@ struct ServiceState: Hashable {
 enum ServiceEvent: Hashable {
     case state(ServiceState)
     case disconnected
+}
+
+enum SettingsTab: String, CaseIterable, Identifiable {
+    case general
+    case display
+    case history
+    case notifications
+    case language
+    case diagnostics
+
+    var id: String { rawValue }
 }

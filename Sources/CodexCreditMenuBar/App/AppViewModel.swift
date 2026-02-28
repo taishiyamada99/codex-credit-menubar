@@ -13,6 +13,7 @@ final class AppViewModel: ObservableObject {
     @Published var historyPoints: [SnapshotPoint]
     @Published var historyRangeDays: Int
     @Published var historyKinds: Set<BucketKind>
+    @Published var activeSettingsTab: SettingsTab
 
     private let classification = ClassificationEngine()
     private let database: AppDatabase
@@ -33,7 +34,8 @@ final class AppViewModel: ObservableObject {
         self.diagnostics = []
         self.historyPoints = []
         self.historyRangeDays = 30
-        self.historyKinds = Set(BucketKind.allCases)
+        self.historyKinds = Set(BucketKind.fallbackCases)
+        self.activeSettingsTab = .general
 
         self.service = CodexRateLimitService(settings: .default) { [db] level, code, message in
             Task {
@@ -54,17 +56,18 @@ final class AppViewModel: ObservableObject {
     }
 
     var visibleSummariesForMenu: [BucketSummary] {
-        let selectedKinds = Set(settings.visibleKinds)
-        let filtered = summaries.filter { selectedKinds.contains($0.kind) }
-        if filtered.isEmpty {
-            if let sevenDay = summaries.first(where: { $0.kind == .sevenDay }) {
-                return [sevenDay]
-            }
-            if let first = summaries.first {
-                return [first]
-            }
+        let kinds = normalizedVisibleKinds(settings.visibleKinds, allowedKinds: selectableKinds)
+        let byKind = Dictionary(uniqueKeysWithValues: summaries.map { ($0.kind, $0) })
+        return kinds.compactMap { byKind[$0] }
+    }
+
+    var selectableKinds: [BucketKind] {
+        let availableSet = Set(summaries.map(\.kind))
+        let available = BucketKind.uiCases.filter { availableSet.contains($0) }
+        if !available.isEmpty {
+            return available
         }
-        return filtered
+        return BucketKind.fallbackCases
     }
 
     var healthText: String {
@@ -143,22 +146,68 @@ final class AppViewModel: ObservableObject {
     }
 
     func menuBarTitle() -> String {
-        let visible = visibleSummariesForMenu
-        guard !visible.isEmpty else {
-            return "--"
+        Self.buildMenuBarTitle(
+            summaries: summaries,
+            settings: settings,
+            serviceState: serviceState,
+            effectiveStatus: effectiveStatus,
+            privacyMask: localized(.menuPrivacyMasked)
+        )
+    }
+
+    nonisolated static func buildMenuBarTitle(
+        summaries: [BucketSummary],
+        settings: AppSettings,
+        serviceState: ServiceState,
+        effectiveStatus: AppHealthStatus,
+        privacyMask: String
+    ) -> String {
+        if summaries.isEmpty {
+            if serviceState.authRequired {
+                return "AUTH"
+            }
+            switch effectiveStatus {
+            case .loading:
+                return "..."
+            case .error:
+                return "ERR"
+            case .stale:
+                return "STALE"
+            case .ok:
+                return "--"
+            }
         }
 
-        let items = visible.prefix(max(1, settings.inlineMaxCount))
-        let texts = items.map { summary -> String in
+        let byKind = Dictionary(uniqueKeysWithValues: summaries.map { ($0.kind, $0) })
+        let orderedAvailable = BucketKind.uiCases.filter { byKind[$0] != nil }
+        if orderedAvailable.isEmpty {
+            return "--"
+        }
+        let fallbackAvailable = orderedAvailable
+        var selectedSeen = Set<BucketKind>()
+        let filteredKinds = settings.visibleKinds
+            .filter { fallbackAvailable.contains($0) && selectedSeen.insert($0).inserted }
+        let kinds = filteredKinds.isEmpty ? [fallbackAvailable[0]] : filteredKinds
+        let visibleCount = max(1, min(settings.inlineMaxCount, 5))
+        let items = kinds.prefix(visibleCount)
+
+        let texts = items.compactMap { kind -> String? in
+            guard let summary = byKind[kind] else {
+                return nil
+            }
             let suffix = settings.privacyMode
-                ? localized(.menuPrivacyMasked)
+                ? privacyMask
                 : DateUtils.displayPercent(summary.primary.remainingPercent)
             return "\(summary.shortLabel) \(suffix)"
         }
 
+        if texts.isEmpty {
+            return "--"
+        }
+
         var title = texts.joined(separator: " | ")
-        if visible.count > settings.inlineMaxCount {
-            let hidden = visible.count - settings.inlineMaxCount
+        if kinds.count > visibleCount {
+            let hidden = kinds.count - visibleCount
             title += " +\(hidden)"
         }
         return title
@@ -208,23 +257,26 @@ final class AppViewModel: ObservableObject {
     }
 
     func setInlineMaxCount(_ count: Int) {
-        settings.inlineMaxCount = min(max(count, 1), 5)
+        let clamped = min(max(count, 1), 5)
+        let requiredForSelection = min(5, normalizedVisibleKinds(settings.visibleKinds, allowedKinds: selectableKinds).count)
+        settings.inlineMaxCount = max(clamped, requiredForSelection)
         persistSettingsAndApply(applySource: false)
     }
 
     func setVisibleKind(_ kind: BucketKind, isVisible: Bool) {
+        guard selectableKinds.contains(kind) else {
+            return
+        }
         var kinds = settings.visibleKinds
         if isVisible {
-            if !kinds.contains(kind) {
-                kinds.append(kind)
-            }
+            kinds.removeAll { $0 == kind }
+            kinds.insert(kind, at: 0)
         } else {
             kinds.removeAll { $0 == kind }
         }
-        if kinds.isEmpty {
-            kinds = [.sevenDay]
-        }
-        settings.visibleKinds = kinds
+        let normalizedKinds = normalizedVisibleKinds(kinds, allowedKinds: selectableKinds)
+        settings.visibleKinds = normalizedKinds
+        settings.inlineMaxCount = max(settings.inlineMaxCount, min(5, normalizedKinds.count))
         persistSettingsAndApply(applySource: false)
     }
 
@@ -236,6 +288,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func toggleHistoryKind(_ kind: BucketKind) {
+        guard selectableKinds.contains(kind) else {
+            return
+        }
         if historyKinds.contains(kind) {
             historyKinds.remove(kind)
         } else {
@@ -247,6 +302,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func setHistoryKind(_ kind: BucketKind, enabled: Bool) {
+        guard selectableKinds.contains(kind) else {
+            return
+        }
         if enabled {
             historyKinds.insert(kind)
         } else {
@@ -261,7 +319,7 @@ final class AppViewModel: ObservableObject {
         settings.aliasRules.append(LimitAliasRule(
             pattern: "",
             field: .limitId,
-            targetKind: .custom,
+            targetKind: .sevenDay,
             enabled: true,
             priority: 100
         ))
@@ -278,7 +336,7 @@ final class AppViewModel: ObservableObject {
         guard let index = settings.aliasRules.firstIndex(where: { $0.id == rule.id }) else {
             return
         }
-        settings.aliasRules[index] = rule
+        settings.aliasRules[index] = normalizedAliasRule(rule)
         persistAliasRulesOnly()
         recomputeSummaries()
     }
@@ -290,8 +348,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func openSettings() {
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        NSApp.activate(ignoringOtherApps: true)
+        SettingsWindowManager.shared.show(viewModel: self)
     }
 
     func quitApp() {
@@ -306,6 +363,17 @@ final class AppViewModel: ObservableObject {
 
     func openSystemNotificationSettings() {
         notifier.openSystemNotificationSettings()
+    }
+
+    func refreshDiagnosticsNow() {
+        Task {
+            await reloadDiagnostics()
+        }
+    }
+
+    func setActiveSettingsTab(_ tab: SettingsTab) {
+        activeSettingsTab = tab
+        SettingsWindowManager.shared.updateSize(for: tab)
     }
 
     func exportCSV() {
@@ -342,14 +410,14 @@ final class AppViewModel: ObservableObject {
                 case let .state(state):
                     serviceState = state
                     recomputeSummaries(rawBuckets: state.buckets)
+                    syncKindsToAvailable()
                     await maybePersistSnapshotIfDue()
                     await notifier.evaluate(
-                        summaries: summaries,
+                        summaries: summaries.filter { selectableKinds.contains($0.kind) },
                         thresholds: settings.thresholdPercents,
                         enabled: settings.notificationsEnabled,
                         languageMode: settings.languageMode
                     )
-                    await reloadDiagnostics()
                 case .disconnected:
                     break
                 }
@@ -358,24 +426,42 @@ final class AppViewModel: ObservableObject {
 
         snapshotTask = Task {
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 60 * 1_000_000_000)
                 await maybePersistSnapshotIfDue()
+                let delaySeconds = nextSnapshotCheckDelaySeconds()
+                try? await Task.sleep(nanoseconds: UInt64(delaySeconds) * 1_000_000_000)
             }
         }
 
         Task {
             let loaded = await database.loadSettings()
             let storedRules = await database.loadAliasRules()
+            let originalSettings = loaded
+            var shouldPersistAliasRules = false
 
             settings = loaded
+            settings.visibleKinds = normalizedVisibleKinds(settings.visibleKinds, allowedKinds: BucketKind.fallbackCases)
+            let normalizedInline = min(max(settings.inlineMaxCount, 1), 5)
+            settings.inlineMaxCount = max(normalizedInline, min(5, settings.visibleKinds.count))
             if !storedRules.isEmpty {
                 settings.aliasRules = storedRules
             }
+            let normalizedRules = normalizedAliasRules(settings.aliasRules)
+            if normalizedRules != settings.aliasRules {
+                settings.aliasRules = normalizedRules
+                shouldPersistAliasRules = true
+            }
+            historyKinds = Set(BucketKind.fallbackCases)
 
             let startAtLogin = startAtLoginManager.isEnabled()
             if settings.startAtLogin != startAtLogin {
                 settings.startAtLogin = startAtLogin
+            }
+
+            if settings != originalSettings {
                 await database.saveSettings(settings)
+            }
+            if shouldPersistAliasRules {
+                await database.saveAliasRules(settings.aliasRules)
             }
 
             await reloadDiagnostics()
@@ -384,6 +470,54 @@ final class AppViewModel: ObservableObject {
             await service.applySettings(settings)
             await service.start()
         }
+    }
+
+    private func normalizedVisibleKinds(_ kinds: [BucketKind], allowedKinds: [BucketKind]) -> [BucketKind] {
+        let allowed = Set(allowedKinds)
+        var seen = Set<BucketKind>()
+        let unique = kinds.filter { allowed.contains($0) && seen.insert($0).inserted }
+        return unique.isEmpty ? [allowedKinds.first ?? .sevenDay] : unique
+    }
+
+    private func syncKindsToAvailable() {
+        let allowedKinds = selectableKinds
+        let normalizedVisible = normalizedVisibleKinds(settings.visibleKinds, allowedKinds: allowedKinds)
+        let normalizedHistory = Set(historyKinds.filter { allowedKinds.contains($0) })
+
+        var changed = false
+        var historyChanged = false
+        if normalizedVisible != settings.visibleKinds {
+            settings.visibleKinds = normalizedVisible
+            settings.inlineMaxCount = max(settings.inlineMaxCount, min(5, normalizedVisible.count))
+            changed = true
+        }
+
+        if normalizedHistory != historyKinds {
+            historyKinds = normalizedHistory.isEmpty ? Set(allowedKinds) : normalizedHistory
+            historyChanged = true
+        }
+
+        if changed {
+            persistSettingsAndApply(applySource: false)
+        }
+        if historyChanged {
+            Task {
+                await reloadHistory()
+            }
+        }
+    }
+
+    private func normalizedAliasRules(_ rules: [LimitAliasRule]) -> [LimitAliasRule] {
+        rules.map { normalizedAliasRule($0) }
+    }
+
+    private func normalizedAliasRule(_ rule: LimitAliasRule) -> LimitAliasRule {
+        guard rule.targetKind == .custom else {
+            return rule
+        }
+        var updated = rule
+        updated.targetKind = .sevenDay
+        return updated
     }
 
     private func recomputeSummaries(rawBuckets: [LimitBucket]? = nil) {
@@ -395,11 +529,9 @@ final class AppViewModel: ObservableObject {
         let settingsCopy = settings
         Task {
             await database.saveSettings(settingsCopy)
-            await database.saveAliasRules(settingsCopy.aliasRules)
             if applySource {
                 await service.applySettings(settingsCopy)
             }
-            await reloadHistory()
         }
     }
 
@@ -428,17 +560,23 @@ final class AppViewModel: ObservableObject {
         let source: SnapshotSource = serviceState.lastUpdatedAt != nil ? .exact : .carriedForward
         let now = Date()
 
-        let points = summaries.map { summary in
-            SnapshotPoint(
-                id: "\(todayKey)-\(summary.kind.rawValue)",
-                dateLocal: todayKey,
-                capturedAt: now,
-                kind: summary.kind,
-                limitId: summary.primary.limitId,
-                remainingPercent: summary.primary.remainingPercent,
-                usedPercent: summary.primary.usedPercent,
-                source: source
-            )
+        let points = summaries
+            .filter { selectableKinds.contains($0.kind) }
+            .map { summary in
+                SnapshotPoint(
+                    id: "\(todayKey)-\(summary.kind.rawValue)",
+                    dateLocal: todayKey,
+                    capturedAt: now,
+                    kind: summary.kind,
+                    limitId: summary.primary.limitId,
+                    remainingPercent: summary.primary.remainingPercent,
+                    usedPercent: summary.primary.usedPercent,
+                    source: source
+                )
+            }
+
+        guard !points.isEmpty else {
+            return
         }
 
         await database.saveSnapshotPoints(points)
@@ -447,6 +585,26 @@ final class AppViewModel: ObservableObject {
         settings.lastSnapshotDateKey = todayKey
         await database.saveSettings(settings)
         await reloadHistory()
+    }
+
+    private func nextSnapshotCheckDelaySeconds() -> Int {
+        let now = Date()
+        if summaries.isEmpty {
+            return 15 * 60
+        }
+
+        let todayKey = DateUtils.localDateKey(from: now)
+        if settings.lastSnapshotDateKey == todayKey {
+            let next = DateUtils.nextSnapshotDate(hour: 2)
+            return max(5 * 60, Int(next.timeIntervalSince(now)))
+        }
+
+        if DateUtils.nowPastSnapshotTime(hour: 2) {
+            return 5 * 60
+        }
+
+        let next = DateUtils.nextSnapshotDate(hour: 2)
+        return max(60, Int(next.timeIntervalSince(now)))
     }
 
     private func reloadHistory() async {

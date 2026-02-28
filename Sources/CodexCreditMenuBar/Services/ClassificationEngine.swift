@@ -61,15 +61,21 @@ struct ClassificationEngine {
         if id.contains("review") || name.contains("review") {
             return .review
         }
-        if id.contains("spark") || name.contains("spark") {
+        if id.contains("spark") || name.contains("spark") || id.contains("bengalfox") {
             return .gptSpark
+        }
+        if id.contains("weekly") || name.contains("7 day") || name.contains("7-day") || name.contains("7d") {
+            return .sevenDay
+        }
+        if name.contains("5 hour") || name.contains("5-hour") || name.contains("5h") {
+            return .fiveHour
         }
 
         if let mins = bucket.windowDurationMins {
-            if mins == 300 {
+            if abs(mins - 300) <= 5 {
                 return .fiveHour
             }
-            if mins == 10_080 {
+            if abs(mins - 10_080) <= 240 {
                 return .sevenDay
             }
         }

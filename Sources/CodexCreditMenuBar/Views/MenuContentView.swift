@@ -4,35 +4,46 @@ struct MenuContentView: View {
     @ObservedObject var viewModel: AppViewModel
 
     var body: some View {
+        let summaryByKind = Dictionary(uniqueKeysWithValues: viewModel.summaries.map { ($0.kind, $0) })
         Section {
-            if viewModel.summaries.isEmpty {
-                Text(viewModel.localized(.noData))
-            }
+            ForEach(viewModel.selectableKinds) { kind in
+                if let summary = summaryByKind[kind] {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(summary.title)
+                            Spacer()
+                            Text(viewModel.settings.privacyMode ? "••" : DateUtils.displayPercent(summary.primary.remainingPercent))
+                            if let delta = viewModel.trendDelta(for: summary.kind) {
+                                Text(trendSymbol(delta))
+                                    .foregroundStyle(deltaColor(delta))
+                                    .font(.caption)
+                            }
+                        }
+                        .font(.body)
 
-            ForEach(viewModel.summaries) { summary in
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text(summary.title)
-                        Spacer()
-                        Text(viewModel.settings.privacyMode ? "••" : DateUtils.displayPercent(summary.primary.remainingPercent))
-                        if let delta = viewModel.trendDelta(for: summary.kind) {
-                            Text(trendSymbol(delta))
-                                .foregroundStyle(deltaColor(delta))
-                                .font(.caption)
+                        HStack(spacing: 8) {
+                            if let reset = summary.primary.resetsAt {
+                                Text("\(viewModel.localized(.resetAt)): \(DateUtils.timeFormatter.string(from: reset))")
+                            }
+                            if let updated = summary.primary.updatedAt ?? viewModel.serviceState.lastUpdatedAt {
+                                Text("\(viewModel.localized(.lastUpdated)): \(DateUtils.timeFormatter.string(from: updated))")
+                            }
                         }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     }
-                    .font(.body)
-
-                    HStack(spacing: 8) {
-                        if let reset = summary.primary.resetsAt {
-                            Text("\(viewModel.localized(.resetAt)): \(DateUtils.timeFormatter.string(from: reset))")
+                } else {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(viewModel.label(for: kind))
+                            Spacer()
+                            Text(viewModel.settings.privacyMode ? "••" : "--")
                         }
-                        if let updated = summary.primary.updatedAt ?? viewModel.serviceState.lastUpdatedAt {
-                            Text("\(viewModel.localized(.lastUpdated)): \(DateUtils.timeFormatter.string(from: updated))")
-                        }
+                        .font(.body)
+                        Text(viewModel.localized(.noData))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                 }
             }
         } header: {

@@ -5,38 +5,47 @@ struct SettingsRootView: View {
     @ObservedObject var viewModel: AppViewModel
 
     var body: some View {
-        TabView {
+        TabView(selection: Binding(
+            get: { viewModel.activeSettingsTab },
+            set: { viewModel.setActiveSettingsTab($0) }
+        )) {
             GeneralSettingsTab(viewModel: viewModel)
+                .tag(SettingsTab.general)
                 .tabItem {
                     Text(viewModel.localized(.general))
                 }
 
             DisplaySettingsTab(viewModel: viewModel)
+                .tag(SettingsTab.display)
                 .tabItem {
                     Text(viewModel.localized(.display))
                 }
 
             HistorySettingsTab(viewModel: viewModel)
+                .tag(SettingsTab.history)
                 .tabItem {
                     Text(viewModel.localized(.history))
                 }
 
             NotificationSettingsTab(viewModel: viewModel)
+                .tag(SettingsTab.notifications)
                 .tabItem {
                     Text(viewModel.localized(.notifications))
                 }
 
             LanguageSettingsTab(viewModel: viewModel)
+                .tag(SettingsTab.language)
                 .tabItem {
                     Text(viewModel.localized(.language))
                 }
 
             DiagnosticsTab(viewModel: viewModel)
+                .tag(SettingsTab.diagnostics)
                 .tabItem {
                     Text(viewModel.localized(.diagnostics))
                 }
         }
-        .padding(16)
+        .padding(10)
     }
 }
 
@@ -127,7 +136,7 @@ private struct DisplaySettingsTab: View {
             Text(viewModel.localized(.visibleInMenu))
                 .font(.headline)
 
-            ForEach(BucketKind.allCases) { kind in
+            ForEach(viewModel.selectableKinds) { kind in
                 Toggle(viewModel.label(for: kind), isOn: Binding(
                     get: { viewModel.settings.visibleKinds.contains(kind) },
                     set: { viewModel.setVisibleKind(kind, isVisible: $0) }
@@ -201,7 +210,7 @@ private struct AliasRuleRow: View {
             }
 
             Picker(viewModel.localized(.ruleTarget), selection: $rule.targetKind) {
-                ForEach(BucketKind.allCases) { kind in
+                ForEach(viewModel.selectableKinds) { kind in
                     Text(viewModel.label(for: kind)).tag(kind)
                 }
             }
@@ -248,7 +257,7 @@ private struct HistorySettingsTab: View {
             .pickerStyle(.segmented)
 
             HStack {
-                ForEach(BucketKind.allCases) { kind in
+                ForEach(viewModel.selectableKinds) { kind in
                     Toggle(viewModel.label(for: kind), isOn: Binding(
                         get: { viewModel.historyKinds.contains(kind) },
                         set: { viewModel.setHistoryKind(kind, enabled: $0) }
@@ -371,6 +380,7 @@ private struct DiagnosticsTab: View {
                 Spacer()
                 Button(viewModel.localized(.refreshNow)) {
                     viewModel.refreshNow()
+                    viewModel.refreshDiagnosticsNow()
                 }
             }
 
@@ -392,6 +402,9 @@ private struct DiagnosticsTab: View {
                     .padding(.vertical, 2)
                 }
             }
+        }
+        .onAppear {
+            viewModel.refreshDiagnosticsNow()
         }
     }
 }

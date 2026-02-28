@@ -12,6 +12,10 @@ actor CodexRateLimitService: RateLimitProvider {
     private var pollTask: Task<Void, Never>?
     private var reconnectBackoffIndex = 0
     private var selectedCommand: CodexCommand?
+    private var lastRefreshSignature: String?
+    private var isRefreshing = false
+    private var queuedRefreshTrigger: String?
+    private var lastRepeatedLogByCode: [String: (message: String, at: Date)] = [:]
 
     private let reconnectBackoffSeconds = [5, 15, 30, 60, 300]
     private let diagnostics: @Sendable (String, String, String) -> Void
@@ -152,8 +156,19 @@ actor CodexRateLimitService: RateLimitProvider {
             return
         }
 
+        if isRefreshing {
+            if trigger == "manual" {
+                queuedRefreshTrigger = "manual"
+            } else if queuedRefreshTrigger == nil {
+                queuedRefreshTrigger = trigger
+            }
+            return
+        }
+        isRefreshing = true
+
         guard let client else {
             await reconnect(reason: "refresh_while_disconnected")
+            await finishRefreshAndDrainQueue()
             return
         }
 
@@ -170,30 +185,40 @@ actor CodexRateLimitService: RateLimitProvider {
                     authRequired: true
                 )))
                 diagnostics("warn", "auth_required", "account/read returned unauthenticated state")
-                return
+            } else {
+                let rateLimitResult = try await client.request(method: "account/rateLimits/read")
+                var buckets = parseRateLimits(result: rateLimitResult)
+
+                if buckets.isEmpty {
+                    buckets = parseRateLimits(result: accountResult)
+                }
+
+                if buckets.isEmpty {
+                    diagnostics("warn", "empty_rate_limits", "No rate limits parsed on \(trigger)")
+                }
+
+                let now = Date()
+                let state = ServiceState(
+                    sourceLabel: selectedCommand?.label ?? "-",
+                    status: .ok,
+                    lastUpdatedAt: now,
+                    buckets: buckets,
+                    message: nil,
+                    authRequired: false
+                )
+                publish(.state(state))
+                let preview = buckets.prefix(4).map { bucket in
+                    "\(bucket.limitId)=\(Int(bucket.remainingPercent.rounded()))%"
+                }.joined(separator: ", ")
+                let signature = buckets
+                    .map { "\($0.limitId):\(Int($0.remainingPercent.rounded())):\($0.windowDurationMins ?? -1)" }
+                    .sorted()
+                    .joined(separator: "|")
+                if trigger != "timer" || signature != lastRefreshSignature {
+                    diagnostics("info", "refresh_success", "trigger=\(trigger) buckets=\(buckets.count) [\(preview)]")
+                    lastRefreshSignature = signature
+                }
             }
-
-            let rateLimitResult = try await client.request(method: "account/rateLimits/read")
-            var buckets = parseRateLimits(result: rateLimitResult)
-
-            if buckets.isEmpty {
-                buckets = parseRateLimits(result: accountResult)
-            }
-
-            if buckets.isEmpty {
-                diagnostics("warn", "empty_rate_limits", "No rate limits parsed on \(trigger)")
-            }
-
-            let now = Date()
-            let state = ServiceState(
-                sourceLabel: selectedCommand?.label ?? "-",
-                status: .ok,
-                lastUpdatedAt: now,
-                buckets: buckets,
-                message: nil,
-                authRequired: false
-            )
-            publish(.state(state))
         } catch {
             diagnostics("error", "refresh_failed", "Refresh failed (\(trigger)): \(error.localizedDescription)")
             publish(.state(ServiceState(
@@ -206,6 +231,16 @@ actor CodexRateLimitService: RateLimitProvider {
             )))
             await reconnect(reason: "refresh_failed")
         }
+        await finishRefreshAndDrainQueue()
+    }
+
+    private func finishRefreshAndDrainQueue() async {
+        isRefreshing = false
+        guard let queued = queuedRefreshTrigger else {
+            return
+        }
+        queuedRefreshTrigger = nil
+        await performRefresh(trigger: queued)
     }
 
     private func parseAuthRequired(_ result: Any) -> Bool {
@@ -230,30 +265,35 @@ actor CodexRateLimitService: RateLimitProvider {
         return false
     }
 
-    private func parseRateLimits(result: Any) -> [LimitBucket] {
+    func parseRateLimits(result: Any) -> [LimitBucket] {
         guard let dict = result as? [String: Any] else {
             return []
         }
 
         if let byID = dict["rateLimitsByLimitId"] as? [String: Any] {
-            let buckets = byID.compactMap { key, value -> LimitBucket? in
+            let buckets = byID.flatMap { key, value -> [LimitBucket] in
                 guard let item = value as? [String: Any] else {
-                    return nil
+                    return []
                 }
-                return parseOneLimit(limitId: key, payload: item)
+                return parseLimitBuckets(limitId: key, payload: item)
             }
             if !buckets.isEmpty {
                 return buckets
             }
         }
 
+        if let one = dict["rateLimits"] as? [String: Any] {
+            let limitId = (one["limitId"] as? String) ?? (one["id"] as? String) ?? "codex"
+            return parseLimitBuckets(limitId: limitId, payload: one)
+        }
+
         if let array = dict["rateLimits"] as? [Any] {
-            let buckets = array.compactMap { item -> LimitBucket? in
+            let buckets = array.flatMap { item -> [LimitBucket] in
                 guard let payload = item as? [String: Any] else {
-                    return nil
+                    return []
                 }
                 let limitId = (payload["limitId"] as? String) ?? (payload["id"] as? String) ?? UUID().uuidString
-                return parseOneLimit(limitId: limitId, payload: payload)
+                return parseLimitBuckets(limitId: limitId, payload: payload)
             }
             if !buckets.isEmpty {
                 return buckets
@@ -268,16 +308,77 @@ actor CodexRateLimitService: RateLimitProvider {
             return parseRateLimits(result: nested)
         }
 
+        if dict["limitId"] != nil || dict["primary"] != nil {
+            let limitId = (dict["limitId"] as? String) ?? (dict["id"] as? String) ?? "codex"
+            return parseLimitBuckets(limitId: limitId, payload: dict)
+        }
+
         return []
     }
 
-    private func parseOneLimit(limitId: String, payload: [String: Any]) -> LimitBucket {
+    private func parseLimitBuckets(limitId: String, payload: [String: Any]) -> [LimitBucket] {
+        let primaryBucket = parseOneLimit(limitId: limitId, payload: payload)
         let limitName = (payload["limitName"] as? String) ?? (payload["name"] as? String) ?? limitId
-        let usedPercent = Self.doubleValue(payload["usedPercent"]) ?? Self.doubleValue(payload["usagePercent"]) ?? 0
-        let remaining = max(0, min(100, 100 - usedPercent))
-        let window = Self.intValue(payload["windowDurationMins"]) ?? Self.intValue(payload["windowDurationMinutes"])
-        let resetAt = DateUtils.parseFlexibleDate(payload["resetsAt"] ?? payload["resetAt"])
-        let updatedAt = DateUtils.parseFlexibleDate(payload["updatedAt"] ?? payload["lastUpdatedAt"])
+        guard let secondaryPart = payload["secondary"] as? [String: Any] else {
+            return [primaryBucket]
+        }
+        let secondaryBucket = parseLimitPart(
+            limitId: limitId,
+            limitName: limitName,
+            part: secondaryPart,
+            fallback: payload,
+            hasSecondary: false
+        )
+        return [primaryBucket, secondaryBucket]
+    }
+
+    func parseOneLimit(limitId: String, payload: [String: Any]) -> LimitBucket {
+        let limitName = (payload["limitName"] as? String) ?? (payload["name"] as? String) ?? limitId
+        let hasSecondary = payload["secondary"] as? [String: Any] != nil
+        if let primaryPart = payload["primary"] as? [String: Any] {
+            return parseLimitPart(
+                limitId: limitId,
+                limitName: limitName,
+                part: primaryPart,
+                fallback: payload,
+                hasSecondary: hasSecondary
+            )
+        }
+
+        return parseLimitPart(
+            limitId: limitId,
+            limitName: limitName,
+            part: payload,
+            fallback: nil,
+            hasSecondary: hasSecondary
+        )
+    }
+
+    private func parseLimitPart(
+        limitId: String,
+        limitName: String,
+        part: [String: Any],
+        fallback: [String: Any]?,
+        hasSecondary: Bool
+    ) -> LimitBucket {
+        let usedPercent = parseUsedPercent(part: part, fallback: fallback)
+        let remaining = clampPercent(100 - usedPercent)
+        let window = Self.intValue(part["windowDurationMins"])
+            ?? Self.intValue(part["windowDurationMinutes"])
+            ?? Self.intValue(fallback?["windowDurationMins"])
+            ?? Self.intValue(fallback?["windowDurationMinutes"])
+        let resetAt = DateUtils.parseFlexibleDate(
+            part["resetsAt"]
+                ?? part["resetAt"]
+                ?? fallback?["resetsAt"]
+                ?? fallback?["resetAt"]
+        )
+        let updatedAt = DateUtils.parseFlexibleDate(
+            part["updatedAt"]
+                ?? part["lastUpdatedAt"]
+                ?? fallback?["updatedAt"]
+                ?? fallback?["lastUpdatedAt"]
+        )
 
         return LimitBucket(
             limitId: limitId,
@@ -287,8 +388,43 @@ actor CodexRateLimitService: RateLimitProvider {
             windowDurationMins: window,
             resetsAt: resetAt,
             updatedAt: updatedAt,
-            hasSecondary: false
+            hasSecondary: hasSecondary
         )
+    }
+
+    private func parseUsedPercent(part: [String: Any], fallback: [String: Any]?) -> Double {
+        if let value = Self.doubleValue(part["usedPercent"])
+            ?? Self.doubleValue(part["usagePercent"])
+            ?? Self.doubleValue(fallback?["usedPercent"])
+            ?? Self.doubleValue(fallback?["usagePercent"]) {
+            return clampPercent(value)
+        }
+
+        if let remaining = Self.doubleValue(part["remainingPercent"])
+            ?? Self.doubleValue(fallback?["remainingPercent"]) {
+            return clampPercent(100 - remaining)
+        }
+
+        let usedCount = Self.doubleValue(part["used"])
+            ?? Self.doubleValue(part["usedCount"])
+            ?? Self.doubleValue(fallback?["used"])
+            ?? Self.doubleValue(fallback?["usedCount"])
+        let totalCount = Self.doubleValue(part["limit"])
+            ?? Self.doubleValue(part["max"])
+            ?? Self.doubleValue(part["total"])
+            ?? Self.doubleValue(fallback?["limit"])
+            ?? Self.doubleValue(fallback?["max"])
+            ?? Self.doubleValue(fallback?["total"])
+
+        if let usedCount, let totalCount, totalCount > 0 {
+            return clampPercent((usedCount / totalCount) * 100)
+        }
+
+        return 0
+    }
+
+    private func clampPercent(_ value: Double) -> Double {
+        max(0, min(100, value))
     }
 
     private static func doubleValue(_ any: Any?) -> Double? {
@@ -347,12 +483,25 @@ actor CodexRateLimitService: RateLimitProvider {
         }
     }
 
-    private func handleNotification(method: String, params _: [String: Any]?) async {
+    private func handleNotification(method: String, params: [String: Any]?) async {
         if method == "account/rateLimits/updated" || method == "account/updated" {
-            diagnostics("info", "server_notification", "Received \(method)")
+            let notificationLog = "Received \(method)"
+            if shouldLogRepeated(code: "server_notification", message: notificationLog, minInterval: 30) {
+                diagnostics("info", "server_notification", notificationLog)
+            }
             await performRefresh(trigger: method)
         } else if method == "stderr" {
-            diagnostics("debug", "server_stderr", "Received stderr output")
+            let message = (params?["message"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if message.isEmpty {
+                let stderrLog = "Received stderr output"
+                if shouldLogRepeated(code: "server_stderr", message: stderrLog, minInterval: 30) {
+                    diagnostics("debug", "server_stderr", stderrLog)
+                }
+            } else {
+                if shouldLogRepeated(code: "server_stderr", message: message, minInterval: 30) {
+                    diagnostics("debug", "server_stderr", message)
+                }
+            }
         }
     }
 
@@ -406,5 +555,16 @@ actor CodexRateLimitService: RateLimitProvider {
 
     private func publish(_ event: ServiceEvent) {
         streamContinuation.yield(event)
+    }
+
+    private func shouldLogRepeated(code: String, message: String, minInterval: TimeInterval) -> Bool {
+        let now = Date()
+        if let previous = lastRepeatedLogByCode[code],
+           previous.message == message,
+           now.timeIntervalSince(previous.at) < minInterval {
+            return false
+        }
+        lastRepeatedLogByCode[code] = (message, now)
+        return true
     }
 }

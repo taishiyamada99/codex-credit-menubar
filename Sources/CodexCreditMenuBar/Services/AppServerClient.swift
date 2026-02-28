@@ -139,17 +139,15 @@ actor AppServerClient {
         requestID += 1
         let id = requestID
 
-        var payload: [String: Any] = [
+        let payload: [String: Any] = [
             "jsonrpc": "2.0",
             "id": id,
-            "method": method
+            "method": method,
+            "params": params ?? [:]
         ]
-        if let params {
-            payload["params"] = params
-        }
 
         let data = try JSONSerialization.data(withJSONObject: payload)
-        try writeFramedMessage(data)
+        try writeLineDelimitedMessage(data)
 
         return try await withCheckedThrowingContinuation { continuation in
             pendingRequests[id] = continuation
@@ -161,28 +159,22 @@ actor AppServerClient {
             throw AppServerError.notConnected
         }
 
-        var payload: [String: Any] = [
+        let payload: [String: Any] = [
             "jsonrpc": "2.0",
-            "method": method
+            "method": method,
+            "params": params ?? [:]
         ]
-        if let params {
-            payload["params"] = params
-        }
 
         let data = try JSONSerialization.data(withJSONObject: payload)
-        try writeFramedMessage(data)
+        try writeLineDelimitedMessage(data)
     }
 
-    private func writeFramedMessage(_ body: Data) throws {
+    private func writeLineDelimitedMessage(_ body: Data) throws {
         guard let stdinHandle else {
             throw AppServerError.notConnected
         }
-        let header = "Content-Length: \(body.count)\r\n\r\n"
-        guard let headerData = header.data(using: .utf8) else {
-            throw AppServerError.invalidResponse
-        }
-        stdinHandle.write(headerData)
         stdinHandle.write(body)
+        stdinHandle.write(Data([0x0A]))
     }
 
     private func appendIncomingData(_ data: Data) async {
@@ -201,7 +193,7 @@ actor AppServerClient {
             }
 
             guard let headerRange = incomingBuffer.range(of: Data("\r\n\r\n".utf8)) else {
-                if incomingBuffer.first == "{".utf8.first {
+                if shouldAttemptLineDelimitedParse() {
                     await parseLineDelimitedMessagesIfNeeded()
                 }
                 return
@@ -213,17 +205,7 @@ actor AppServerClient {
                 continue
             }
 
-            let lines = header.components(separatedBy: "\r\n")
-            var parsedLength: Int?
-            for line in lines {
-                let lower = line.lowercased()
-                if lower.hasPrefix("content-length:") {
-                    let value = lower.replacingOccurrences(of: "content-length:", with: "").trimmingCharacters(in: .whitespaces)
-                    parsedLength = Int(value)
-                    break
-                }
-            }
-
+            let parsedLength = parseContentLength(from: header)
             if let parsedLength {
                 expectedBodyLength = parsedLength
                 continue
@@ -234,33 +216,46 @@ actor AppServerClient {
         }
     }
 
+    private func parseContentLength(from header: String) -> Int? {
+        let lower = header.lowercased()
+        guard let range = lower.range(of: "content-length:") else {
+            return nil
+        }
+        let tail = lower[range.upperBound...]
+        let digits = tail
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .prefix { $0.isNumber }
+        return Int(digits)
+    }
+
+    private func shouldAttemptLineDelimitedParse() -> Bool {
+        for byte in incomingBuffer {
+            if byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D {
+                continue
+            }
+            return byte == 0x7B
+        }
+        return false
+    }
+
     private func parseLineDelimitedMessagesIfNeeded() async {
-        guard let text = String(data: incomingBuffer, encoding: .utf8) else {
-            return
-        }
+        while let newlineIndex = incomingBuffer.firstIndex(of: 0x0A) {
+            let lineData = incomingBuffer.prefix(upTo: newlineIndex)
+            incomingBuffer.removeSubrange(incomingBuffer.startIndex...newlineIndex)
 
-        let lines = text.split(separator: "\n")
-        guard !lines.isEmpty else {
-            return
-        }
-
-        var consumedBytes = 0
-        for line in lines {
-            let lineString = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard lineString.hasPrefix("{") else {
-                consumedBytes += line.utf8.count + 1
+            guard !lineData.isEmpty else {
                 continue
             }
-            guard let data = lineString.data(using: .utf8) else {
-                consumedBytes += line.utf8.count + 1
+
+            guard let line = String(data: lineData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                line.hasPrefix("{"),
+                let payload = line.data(using: .utf8)
+            else {
                 continue
             }
-            await handleMessageData(data)
-            consumedBytes += line.utf8.count + 1
-        }
 
-        if consumedBytes > 0, consumedBytes <= incomingBuffer.count {
-            incomingBuffer.removeFirst(consumedBytes)
+            await handleMessageData(payload)
         }
     }
 
