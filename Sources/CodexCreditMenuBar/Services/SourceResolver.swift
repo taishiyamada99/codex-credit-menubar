@@ -23,10 +23,8 @@ struct SourceResolver {
     private func desktopCommands() -> [CodexCommand] {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let candidates = [
-            "/Applications/Codex.app/Contents/MacOS/codex",
             "/Applications/Codex.app/Contents/Resources/bin/codex",
             "/Applications/Codex.app/Contents/Resources/codex",
-            "\(home)/Applications/Codex.app/Contents/MacOS/codex",
             "\(home)/Applications/Codex.app/Contents/Resources/bin/codex",
             "\(home)/Applications/Codex.app/Contents/Resources/codex"
         ]
@@ -58,11 +56,15 @@ struct SourceResolver {
         }
 
         if expanded.contains("/") {
-            guard FileManager.default.isExecutableFile(atPath: expanded) else {
+            let safePath = sanitizePathForCodexApp(path: expanded)
+            guard let safePath else {
+                return []
+            }
+            guard FileManager.default.isExecutableFile(atPath: safePath) else {
                 return []
             }
             return [CodexCommand(
-                launchPath: expanded,
+                launchPath: safePath,
                 arguments: ["app-server", "--listen", "stdio://"],
                 label: "Custom"
             )]
@@ -73,5 +75,25 @@ struct SourceResolver {
             arguments: [expanded, "app-server", "--listen", "stdio://"],
             label: "Custom"
         )]
+    }
+
+    func isUnsafeCodexAppPath(_ path: String) -> Bool {
+        path.lowercased().contains("/codex.app/contents/macos/")
+    }
+
+    func sanitizePathForCodexApp(path: String) -> String? {
+        guard isUnsafeCodexAppPath(path) else {
+            return path
+        }
+
+        guard let prefix = path.range(of: "/Contents/MacOS/", options: [.caseInsensitive]) else {
+            return nil
+        }
+        let appRoot = String(path[..<prefix.lowerBound])
+        let fallback = appRoot + "/Contents/Resources/codex"
+        if FileManager.default.isExecutableFile(atPath: fallback) {
+            return fallback
+        }
+        return nil
     }
 }
