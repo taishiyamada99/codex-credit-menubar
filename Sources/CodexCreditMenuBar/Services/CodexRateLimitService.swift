@@ -144,7 +144,7 @@ actor CodexRateLimitService: RateLimitProvider {
             "protocolVersion": "2025-06-18",
             "clientInfo": [
                 "name": "CodexCreditMenuBar",
-                "version": "1.0.0"
+                "version": "0.1.0"
             ],
             "capabilities": [:]
         ])
