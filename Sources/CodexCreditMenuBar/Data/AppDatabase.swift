@@ -10,13 +10,19 @@ actor AppDatabase {
     private let maxDiagnosticRows = 2_000
     private let diagnosticPruneInterval = 50
 
-    init() {
+    init(databaseURL: URL? = nil) {
         let fileManager = FileManager.default
-        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        let appDir = appSupport.appendingPathComponent("CodexCreditMenuBar", isDirectory: true)
-        try? fileManager.createDirectory(at: appDir, withIntermediateDirectories: true, attributes: nil)
-        dbURL = appDir.appendingPathComponent("codex_credits.sqlite")
+        if let databaseURL {
+            let directory = databaseURL.deletingLastPathComponent()
+            try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
+            dbURL = databaseURL
+        } else {
+            let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+                ?? URL(fileURLWithPath: NSTemporaryDirectory())
+            let appDir = appSupport.appendingPathComponent("CodexCreditMenuBar", isDirectory: true)
+            try? fileManager.createDirectory(at: appDir, withIntermediateDirectories: true, attributes: nil)
+            dbURL = appDir.appendingPathComponent("codex_credits.sqlite")
+        }
 
         Self.openDatabase(at: dbURL, db: &db)
         Self.createTablesIfNeeded(db: db)
@@ -47,66 +53,241 @@ actor AppDatabase {
         setSetting(key: AppSettings.settingsKey, value: json)
     }
 
-    func loadAliasRules() -> [LimitAliasRule] {
+    func saveShortRawSamples(slotEpoch: Int64, capturedAt: Date, samples: [RawBucketSample]) {
+        guard !samples.isEmpty else {
+            return
+        }
         let sql = """
-        SELECT id, pattern, field, target_kind, enabled, priority
-        FROM alias_rules
-        ORDER BY priority ASC, id ASC;
+        INSERT OR REPLACE INTO short_samples_raw(
+            slot_epoch, captured_at, limit_id, limit_name, kind, remaining_percent, used_percent, resets_at, source
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
+        guard let statement = prepare(sql: sql) else {
+            return
+        }
+        defer { sqlite3_finalize(statement) }
+
+        for sample in samples {
+            sqlite3_reset(statement)
+            sqlite3_clear_bindings(statement)
+            sqlite3_bind_int64(statement, 1, slotEpoch)
+            sqlite3_bind_int64(statement, 2, Int64(capturedAt.timeIntervalSince1970))
+            bindText(statement, index: 3, value: sample.limitId)
+            bindText(statement, index: 4, value: sample.limitName)
+            bindText(statement, index: 5, value: sample.kind.rawValue)
+            sqlite3_bind_double(statement, 6, sample.remainingPercent)
+            sqlite3_bind_double(statement, 7, sample.usedPercent)
+            if let resetsAt = sample.resetsAt {
+                sqlite3_bind_int64(statement, 8, Int64(resetsAt.timeIntervalSince1970))
+            } else {
+                sqlite3_bind_null(statement, 8)
+            }
+            bindText(statement, index: 9, value: sample.source.rawValue)
+            _ = sqlite3_step(statement)
+        }
+    }
+
+    func pruneShortRawSamples(olderThanSlotEpoch slotEpoch: Int64) {
+        let sql = "DELETE FROM short_samples_raw WHERE slot_epoch < ?;"
+        guard let statement = prepare(sql: sql) else {
+            return
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, slotEpoch)
+        _ = sqlite3_step(statement)
+    }
+
+    func countShortRawSamples(slotEpoch: Int64) -> Int {
+        let sql = "SELECT COUNT(*) FROM short_samples_raw WHERE slot_epoch = ?;"
+        guard let statement = prepare(sql: sql) else {
+            return 0
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, slotEpoch)
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            return 0
+        }
+        return Int(sqlite3_column_int(statement, 0))
+    }
+
+    func saveLongTermRawDaily(dayKeyGMT: String, capturedAt: Date, samples: [RawBucketSample]) {
+        guard !samples.isEmpty else {
+            return
+        }
+        let sql = """
+        INSERT OR REPLACE INTO long_term_raw_daily(
+            day_key_gmt, captured_at, limit_id, limit_name, kind, remaining_percent, used_percent, resets_at, source
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """
+        guard let statement = prepare(sql: sql) else {
+            return
+        }
+        defer { sqlite3_finalize(statement) }
+
+        for sample in samples {
+            sqlite3_reset(statement)
+            sqlite3_clear_bindings(statement)
+            bindText(statement, index: 1, value: dayKeyGMT)
+            sqlite3_bind_int64(statement, 2, Int64(capturedAt.timeIntervalSince1970))
+            bindText(statement, index: 3, value: sample.limitId)
+            bindText(statement, index: 4, value: sample.limitName)
+            bindText(statement, index: 5, value: sample.kind.rawValue)
+            sqlite3_bind_double(statement, 6, sample.remainingPercent)
+            sqlite3_bind_double(statement, 7, sample.usedPercent)
+            if let resetsAt = sample.resetsAt {
+                sqlite3_bind_int64(statement, 8, Int64(resetsAt.timeIntervalSince1970))
+            } else {
+                sqlite3_bind_null(statement, 8)
+            }
+            bindText(statement, index: 9, value: sample.source.rawValue)
+            _ = sqlite3_step(statement)
+        }
+    }
+
+    func pruneLongTermRawDaily(retention: LongTermRetention, now: Date = Date()) {
+        guard let retentionDays = retention.retentionDays else {
+            return
+        }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .gmt
+        let cutoffDate = calendar.date(byAdding: .day, value: -retentionDays, to: now) ?? now
+        let cutoffDayKey = DateUtils.gmtDateKey(from: cutoffDate)
+        let sql = "DELETE FROM long_term_raw_daily WHERE day_key_gmt < ?;"
+        guard let statement = prepare(sql: sql) else {
+            return
+        }
+        defer { sqlite3_finalize(statement) }
+        bindText(statement, index: 1, value: cutoffDayKey)
+        _ = sqlite3_step(statement)
+    }
+
+    func countLongTermRawSamples(dayKeyGMT: String) -> Int {
+        let sql = "SELECT COUNT(*) FROM long_term_raw_daily WHERE day_key_gmt = ?;"
+        guard let statement = prepare(sql: sql) else {
+            return 0
+        }
+        defer { sqlite3_finalize(statement) }
+        bindText(statement, index: 1, value: dayKeyGMT)
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            return 0
+        }
+        return Int(sqlite3_column_int(statement, 0))
+    }
+
+    func fetchShortRawHistory(fromSlotEpoch slotEpoch: Int64, kinds: Set<BucketKind>) -> [SnapshotPoint] {
+        var sql = """
+        SELECT slot_epoch, kind, MIN(remaining_percent), MAX(used_percent),
+               MAX(CASE WHEN source = 'exact' THEN 1 ELSE 0 END)
+        FROM short_samples_raw
+        WHERE slot_epoch >= ?
+        """
+        let requestedKinds = kinds.isEmpty ? BucketKind.allCases : Array(kinds)
+        if !requestedKinds.isEmpty {
+            let placeholders = Array(repeating: "?", count: requestedKinds.count).joined(separator: ",")
+            sql += " AND kind IN (\(placeholders))"
+        }
+        sql += " GROUP BY slot_epoch, kind ORDER BY slot_epoch ASC, kind ASC;"
+
         guard let statement = prepare(sql: sql) else {
             return []
         }
         defer { sqlite3_finalize(statement) }
 
-        var rules: [LimitAliasRule] = []
-        while sqlite3_step(statement) == SQLITE_ROW {
-            let idString = stringValue(statement, index: 0)
-            let pattern = stringValue(statement, index: 1)
-            let fieldRaw = stringValue(statement, index: 2)
-            let targetRaw = stringValue(statement, index: 3)
-            let enabled = sqlite3_column_int(statement, 4) == 1
-            let priority = Int(sqlite3_column_int(statement, 5))
+        sqlite3_bind_int64(statement, 1, slotEpoch)
+        for (index, kind) in requestedKinds.enumerated() {
+            bindText(statement, index: Int32(index + 2), value: kind.rawValue)
+        }
 
-            guard let uuid = UUID(uuidString: idString),
-                  let field = AliasField(rawValue: fieldRaw),
-                  let target = BucketKind(rawValue: targetRaw)
-            else {
+        var points: [SnapshotPoint] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let slot = sqlite3_column_int64(statement, 0)
+            let kindRaw = stringValue(statement, index: 1)
+            let remaining = sqlite3_column_double(statement, 2)
+            let usedPercent: Double?
+            if sqlite3_column_type(statement, 3) == SQLITE_NULL {
+                usedPercent = nil
+            } else {
+                usedPercent = sqlite3_column_double(statement, 3)
+            }
+            let hasExact = sqlite3_column_int(statement, 4) == 1
+            guard let kind = BucketKind(rawValue: kindRaw) else {
                 continue
             }
-            rules.append(LimitAliasRule(
-                id: uuid,
-                pattern: pattern,
-                field: field,
-                targetKind: target,
-                enabled: enabled,
-                priority: priority
+            let capturedAt = Date(timeIntervalSince1970: TimeInterval(slot))
+            let source: SnapshotSource = hasExact ? .exact : .carriedForward
+            points.append(SnapshotPoint(
+                id: "short-\(slot)-\(kind.rawValue)",
+                dateLocal: DateUtils.localDateKey(from: capturedAt),
+                capturedAt: capturedAt,
+                kind: kind,
+                limitId: "\(kind.rawValue)-short",
+                remainingPercent: remaining,
+                usedPercent: usedPercent,
+                source: source
             ))
         }
-        return rules
+        return points
     }
 
-    func saveAliasRules(_ rules: [LimitAliasRule]) {
-        exec(sql: "DELETE FROM alias_rules;")
-        let insert = """
-        INSERT INTO alias_rules(id, pattern, field, target_kind, enabled, priority)
-        VALUES (?, ?, ?, ?, ?, ?);
+    func fetchLongTermRawHistory(fromDayKeyGMT dayKeyGMT: String, kinds: Set<BucketKind>) -> [SnapshotPoint] {
+        var sql = """
+        SELECT day_key_gmt, kind, MIN(remaining_percent), MAX(used_percent),
+               MAX(CASE WHEN source = 'exact' THEN 1 ELSE 0 END), MIN(captured_at)
+        FROM long_term_raw_daily
+        WHERE day_key_gmt >= ?
         """
-        guard let statement = prepare(sql: insert) else {
-            return
+        let requestedKinds = kinds.isEmpty ? BucketKind.allCases : Array(kinds)
+        if !requestedKinds.isEmpty {
+            let placeholders = Array(repeating: "?", count: requestedKinds.count).joined(separator: ",")
+            sql += " AND kind IN (\(placeholders))"
+        }
+        sql += " GROUP BY day_key_gmt, kind ORDER BY day_key_gmt ASC, kind ASC;"
+
+        guard let statement = prepare(sql: sql) else {
+            return []
         }
         defer { sqlite3_finalize(statement) }
 
-        for rule in rules {
-            sqlite3_reset(statement)
-            sqlite3_clear_bindings(statement)
-            bindText(statement, index: 1, value: rule.id.uuidString)
-            bindText(statement, index: 2, value: rule.pattern)
-            bindText(statement, index: 3, value: rule.field.rawValue)
-            bindText(statement, index: 4, value: rule.targetKind.rawValue)
-            sqlite3_bind_int(statement, 5, rule.enabled ? 1 : 0)
-            sqlite3_bind_int(statement, 6, Int32(rule.priority))
-            _ = sqlite3_step(statement)
+        bindText(statement, index: 1, value: dayKeyGMT)
+        for (index, kind) in requestedKinds.enumerated() {
+            bindText(statement, index: Int32(index + 2), value: kind.rawValue)
         }
+
+        var points: [SnapshotPoint] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let dayKey = stringValue(statement, index: 0)
+            let kindRaw = stringValue(statement, index: 1)
+            let remaining = sqlite3_column_double(statement, 2)
+            let usedPercent: Double?
+            if sqlite3_column_type(statement, 3) == SQLITE_NULL {
+                usedPercent = nil
+            } else {
+                usedPercent = sqlite3_column_double(statement, 3)
+            }
+            let hasExact = sqlite3_column_int(statement, 4) == 1
+            let capturedAtEpoch = sqlite3_column_int64(statement, 5)
+            guard let kind = BucketKind(rawValue: kindRaw) else {
+                continue
+            }
+            let capturedAt: Date
+            if capturedAtEpoch > 0 {
+                capturedAt = Date(timeIntervalSince1970: TimeInterval(capturedAtEpoch))
+            } else {
+                capturedAt = DateUtils.dateFromGMTDateKey(dayKey) ?? Date()
+            }
+            let source: SnapshotSource = hasExact ? .exact : .carriedForward
+            points.append(SnapshotPoint(
+                id: "long-\(dayKey)-\(kind.rawValue)",
+                dateLocal: dayKey,
+                capturedAt: capturedAt,
+                kind: kind,
+                limitId: "\(kind.rawValue)-long",
+                remainingPercent: remaining,
+                usedPercent: usedPercent,
+                source: source
+            ))
+        }
+        return points
     }
 
     func saveSnapshotPoints(_ points: [SnapshotPoint]) {
@@ -214,41 +395,6 @@ actor AppDatabase {
         _ = sqlite3_step(statement)
     }
 
-    func wasThresholdNotified(limitId: String, resetAt: Date, threshold: Int) -> Bool {
-        let sql = """
-        SELECT 1 FROM notify_state
-        WHERE limit_id = ? AND reset_at = ? AND threshold = ?
-        LIMIT 1;
-        """
-        guard let statement = prepare(sql: sql) else {
-            return false
-        }
-        defer { sqlite3_finalize(statement) }
-
-        bindText(statement, index: 1, value: limitId)
-        sqlite3_bind_int64(statement, 2, Int64(resetAt.timeIntervalSince1970))
-        sqlite3_bind_int(statement, 3, Int32(threshold))
-
-        return sqlite3_step(statement) == SQLITE_ROW
-    }
-
-    func markThresholdNotified(limitId: String, resetAt: Date, threshold: Int) {
-        let sql = """
-        INSERT OR IGNORE INTO notify_state(limit_id, reset_at, threshold, notified_at)
-        VALUES (?, ?, ?, ?);
-        """
-        guard let statement = prepare(sql: sql) else {
-            return
-        }
-        defer { sqlite3_finalize(statement) }
-
-        bindText(statement, index: 1, value: limitId)
-        sqlite3_bind_int64(statement, 2, Int64(resetAt.timeIntervalSince1970))
-        sqlite3_bind_int(statement, 3, Int32(threshold))
-        sqlite3_bind_int64(statement, 4, Int64(Date().timeIntervalSince1970))
-        _ = sqlite3_step(statement)
-    }
-
     func appendDiagnostic(level: String, code: String, message: String) {
         let sql = """
         INSERT INTO diagnostic_events(level, code, message, created_at)
@@ -306,22 +452,17 @@ actor AppDatabase {
     }
 
     private static func createTablesIfNeeded(db: OpaquePointer?) {
+        // Alias-rules feature has been removed; clean up legacy table if present.
+        exec(db: db, sql: "DROP TABLE IF EXISTS alias_rules;")
+        // Notification feature has been removed; clean up legacy table if present.
+        exec(db: db, sql: "DROP TABLE IF EXISTS notify_state;")
+
         let statements = [
             """
             CREATE TABLE IF NOT EXISTS settings(
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
-            );
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS alias_rules(
-                id TEXT PRIMARY KEY,
-                pattern TEXT NOT NULL,
-                field TEXT NOT NULL,
-                target_kind TEXT NOT NULL,
-                enabled INTEGER NOT NULL,
-                priority INTEGER NOT NULL
             );
             """,
             """
@@ -338,14 +479,40 @@ actor AppDatabase {
             );
             """,
             """
-            CREATE TABLE IF NOT EXISTS notify_state(
+            CREATE TABLE IF NOT EXISTS short_samples_raw(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                slot_epoch INTEGER NOT NULL,
+                captured_at INTEGER NOT NULL,
                 limit_id TEXT NOT NULL,
-                reset_at INTEGER NOT NULL,
-                threshold INTEGER NOT NULL,
-                notified_at INTEGER NOT NULL,
-                UNIQUE(limit_id, reset_at, threshold)
+                limit_name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                remaining_percent REAL NOT NULL,
+                used_percent REAL,
+                resets_at INTEGER,
+                source TEXT NOT NULL,
+                UNIQUE(slot_epoch, limit_id)
             );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS long_term_raw_daily(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                day_key_gmt TEXT NOT NULL,
+                captured_at INTEGER NOT NULL,
+                limit_id TEXT NOT NULL,
+                limit_name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                remaining_percent REAL NOT NULL,
+                used_percent REAL,
+                resets_at INTEGER,
+                source TEXT NOT NULL,
+                UNIQUE(day_key_gmt, limit_id)
+            );
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_short_slot_epoch ON short_samples_raw(slot_epoch);
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_long_day_key ON long_term_raw_daily(day_key_gmt);
             """,
             """
             CREATE TABLE IF NOT EXISTS diagnostic_events(

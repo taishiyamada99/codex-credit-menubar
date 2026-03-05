@@ -12,23 +12,31 @@ enum L10nKey: String {
     case lastUpdated
     case resetAt
     case general
+    case usage
     case display
     case history
-    case notifications
     case diagnostics
+    case connection
+    case usageOverview
+    case usageDataRetention
+    case recentEvents
+    case copyLogs
+    case autoRefresh
+    case localSnapshots
+    case rollingWindow
+    case staleThresholdRule
+    case reconnectBackoffRule
+    case handledErrors
+    case handledErrorsLine1
+    case handledErrorsLine2
+    case troubleshootingOnly
     case enabled
     case disabled
     case save
     case visibleInMenu
-    case privacyMode
-    case maxInline
-    case aliasRules
-    case addRule
     case noData
     case retention
     case exportCSV
-    case requestNotification
-    case thresholds
     case accountSignInRequired
     case currentSource
     case customPath
@@ -37,6 +45,10 @@ enum L10nKey: String {
     case healthLoading
     case healthStale
     case healthError
+    case manualRefresh
+    case refreshing
+    case refreshSuccess
+    case refreshFailed
     case menuAllLimits
     case staleWarning
     case settings
@@ -47,12 +59,6 @@ enum L10nKey: String {
     case sourceApp
     case sourceCLI
     case sourceCustom
-    case rulePattern
-    case ruleField
-    case ruleTarget
-    case rulePriority
-    case remove
-    case menuPrivacyMasked
     case snapshotsRange
     case days7
     case days30
@@ -61,8 +67,14 @@ enum L10nKey: String {
     case diagnosticsEmpty
     case codexNotFound
     case authRequired
-    case openNotificationSettings
     case comparePrevDay
+    case shortStoragePolicy
+    case longStoragePolicy
+    case longTermRetention
+    case retentionOneYear
+    case retentionTwoYears
+    case retentionFiveYears
+    case retentionUnlimited
 }
 
 enum L10n {
@@ -100,23 +112,31 @@ enum L10n {
         .lastUpdated: "Last Updated",
         .resetAt: "Reset",
         .general: "General",
+        .usage: "Usage",
         .display: "Display",
         .history: "History",
-        .notifications: "Notifications",
         .diagnostics: "Diagnostics",
+        .connection: "Connection",
+        .usageOverview: "Usage Overview",
+        .usageDataRetention: "Usage Data Retention",
+        .recentEvents: "Recent Events",
+        .copyLogs: "Copy logs",
+        .autoRefresh: "Auto-refresh",
+        .localSnapshots: "Data shown: local snapshots",
+        .rollingWindow: "Rolling window",
+        .staleThresholdRule: "Stale threshold: 15 minutes without update",
+        .reconnectBackoffRule: "Reconnect backoff: 5s -> 15s -> 30s -> 60s -> 300s",
+        .handledErrors: "Handled errors",
+        .handledErrorsLine1: "CodexNotFound / AuthRequired / RateLimitUnavailable",
+        .handledErrorsLine2: "ServerOverloaded (-32001) with automatic retry",
+        .troubleshootingOnly: "Diagnostics view is for troubleshooting only",
         .enabled: "Enabled",
         .disabled: "Disabled",
         .save: "Save",
         .visibleInMenu: "Visible in menu bar",
-        .privacyMode: "Privacy mode",
-        .maxInline: "Max inline items",
-        .aliasRules: "Alias rules",
-        .addRule: "Add Rule",
         .noData: "No data",
         .retention: "Retention",
         .exportCSV: "Export CSV",
-        .requestNotification: "Request Notification Permission",
-        .thresholds: "Thresholds",
         .accountSignInRequired: "Sign in required",
         .currentSource: "Current source",
         .customPath: "Custom codex path",
@@ -125,6 +145,10 @@ enum L10n {
         .healthLoading: "Loading",
         .healthStale: "Stale",
         .healthError: "Error",
+        .manualRefresh: "Manual refresh",
+        .refreshing: "Refreshing",
+        .refreshSuccess: "Success",
+        .refreshFailed: "Failed",
         .menuAllLimits: "All limits",
         .staleWarning: "Data is stale",
         .settings: "Settings",
@@ -135,12 +159,6 @@ enum L10n {
         .sourceApp: "Codex App",
         .sourceCLI: "Codex CLI",
         .sourceCustom: "Custom Path",
-        .rulePattern: "Pattern",
-        .ruleField: "Field",
-        .ruleTarget: "Target",
-        .rulePriority: "Priority",
-        .remove: "Remove",
-        .menuPrivacyMasked: "Hidden",
         .snapshotsRange: "Range",
         .days7: "7 days",
         .days30: "30 days",
@@ -149,8 +167,14 @@ enum L10n {
         .diagnosticsEmpty: "No diagnostics",
         .codexNotFound: "Codex command not found",
         .authRequired: "Authentication required",
-        .openNotificationSettings: "Open Notification Settings",
-        .comparePrevDay: "vs prev day"
+        .comparePrevDay: "vs prev day",
+        .shortStoragePolicy: "Short-term storage: Raw, every 5 minutes, fixed 28 days",
+        .longStoragePolicy: "Long-term storage: Raw, daily at GMT 00:00",
+        .longTermRetention: "Long-term retention",
+        .retentionOneYear: "1 year",
+        .retentionTwoYears: "2 years",
+        .retentionFiveYears: "5 years",
+        .retentionUnlimited: "Unlimited"
     ]
 
     private static let ja: [L10nKey: String] = [
@@ -165,23 +189,31 @@ enum L10n {
         .lastUpdated: "最終更新",
         .resetAt: "リセット",
         .general: "一般",
+        .usage: "使用状況",
         .display: "表示",
         .history: "履歴",
-        .notifications: "通知",
         .diagnostics: "診断",
+        .connection: "接続",
+        .usageOverview: "使用状況",
+        .usageDataRetention: "利用データ保持",
+        .recentEvents: "最近のイベント",
+        .copyLogs: "ログをコピー",
+        .autoRefresh: "自動更新",
+        .localSnapshots: "表示データ: ローカルスナップショット",
+        .rollingWindow: "ローリングウィンドウ",
+        .staleThresholdRule: "Stale判定: 更新なし15分",
+        .reconnectBackoffRule: "再接続バックオフ: 5秒→15秒→30秒→60秒→300秒",
+        .handledErrors: "対応済みエラー",
+        .handledErrorsLine1: "CodexNotFound / AuthRequired / RateLimitUnavailable",
+        .handledErrorsLine2: "ServerOverloaded (-32001) は自動リトライ",
+        .troubleshootingOnly: "診断ビューはトラブルシューティング用です",
         .enabled: "有効",
         .disabled: "無効",
         .save: "保存",
         .visibleInMenu: "メニューバー表示",
-        .privacyMode: "プライバシーモード",
-        .maxInline: "横並び最大件数",
-        .aliasRules: "別名ルール",
-        .addRule: "ルール追加",
         .noData: "データなし",
         .retention: "保持期間",
         .exportCSV: "CSV出力",
-        .requestNotification: "通知許可を要求",
-        .thresholds: "閾値",
         .accountSignInRequired: "サインインが必要です",
         .currentSource: "現在のソース",
         .customPath: "codexカスタムパス",
@@ -190,6 +222,10 @@ enum L10n {
         .healthLoading: "読み込み中",
         .healthStale: "古い",
         .healthError: "エラー",
+        .manualRefresh: "手動更新",
+        .refreshing: "更新中",
+        .refreshSuccess: "成功",
+        .refreshFailed: "失敗",
         .menuAllLimits: "全リミット",
         .staleWarning: "データが古くなっています",
         .settings: "設定",
@@ -200,12 +236,6 @@ enum L10n {
         .sourceApp: "Codex App",
         .sourceCLI: "Codex CLI",
         .sourceCustom: "カスタムパス",
-        .rulePattern: "パターン",
-        .ruleField: "対象フィールド",
-        .ruleTarget: "分類先",
-        .rulePriority: "優先度",
-        .remove: "削除",
-        .menuPrivacyMasked: "非表示",
         .snapshotsRange: "期間",
         .days7: "7日",
         .days30: "30日",
@@ -214,7 +244,13 @@ enum L10n {
         .diagnosticsEmpty: "診断ログなし",
         .codexNotFound: "Codex コマンドが見つかりません",
         .authRequired: "認証が必要です",
-        .openNotificationSettings: "通知設定を開く",
-        .comparePrevDay: "前日比"
+        .comparePrevDay: "前日比",
+        .shortStoragePolicy: "短期保存: Raw（5分間隔、固定28日）",
+        .longStoragePolicy: "長期保存: Raw（GMT 00:00で日次）",
+        .longTermRetention: "長期保持期間",
+        .retentionOneYear: "1年",
+        .retentionTwoYears: "2年",
+        .retentionFiveYears: "5年",
+        .retentionUnlimited: "無期限"
     ]
 }

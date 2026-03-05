@@ -4,8 +4,9 @@ A lightweight macOS menu bar app that shows Codex credit/rate-limit remaining pe
 
 ## Highlights
 
-- Menu bar resident app (`MenuBarExtra`) with default inline display: `7D xx%`
-- Dropdown menu with all available buckets from app-server
+- Menu bar resident app (`MenuBarExtra`) with default inline display: `7Dxx%`
+- Inline menu bar display is fixed to 3 items maximum
+- Minimal dropdown menu with quick actions (`Refresh now`, `Settings`, `Language`, `Quit`)
 - Data source modes:
   - `Auto (Desktop-first)`
   - `Codex App`
@@ -13,11 +14,14 @@ A lightweight macOS menu bar app that shows Codex credit/rate-limit remaining pe
   - `Custom Path`
 - Automatic refresh every 5 minutes + manual refresh
 - App-server notifications (`account/rateLimits/updated`, `account/updated`) trigger immediate refresh
-- Daily local snapshot at 02:00 with 180-day retention (SQLite)
-- History graph (7/30/90/180 days) + CSV export
-- Threshold notifications (default: 20/10/5%) with duplicate suppression
+- Manual refresh result message with local timestamp in Settings
+- Raw dual-retention persistence (SQLite):
+  - Short-term: every 5 minutes, fixed 28 days
+  - Long-term: daily at GMT 00:00, retention selectable (`1y`, `2y`, `5y`, `unlimited`)
+- Usage graph (7/30/90/180 days) + CSV export
 - Start at login toggle (`SMAppService`)
 - UI language switching (`system`, `en`, `ja`)
+- Settings tabs: `General`, `Usage`, `Diagnostics`
 - Diagnostics tab for connection/source/error visibility
 
 ## Requirements
@@ -54,11 +58,18 @@ The app updates data at these points:
 - When `Refresh now` is pressed
 - On reconnect attempts after failures with exponential backoff
 
+## Data Retention Model
+
+- Storage backend: local SQLite (`Application Support/CodexCreditMenuBar/app.sqlite`)
+- Short-term table stores raw bucket-level rows every 5 minutes for 28 days
+- Long-term table stores raw bucket-level rows once per GMT day
+- Long-term retention is configurable from Settings: 1 year / 2 years / 5 years / unlimited
+
 ## Project Layout
 
 - `Sources/CodexCreditMenuBar/App`: app entry, view model, settings window manager
 - `Sources/CodexCreditMenuBar/Views`: menu and settings UI
-- `Sources/CodexCreditMenuBar/Services`: app-server client, source resolver, classification, notifications
+- `Sources/CodexCreditMenuBar/Services`: app-server client, source resolver, classification
 - `Sources/CodexCreditMenuBar/Data`: SQLite persistence layer
 - `Sources/CodexCreditMenuBar/Models`: domain/state models
 - `Tests/CodexCreditMenuBarTests`: unit tests
@@ -68,4 +79,3 @@ The app updates data at these points:
 - This app does not manage API keys directly.
 - Authentication is delegated to `codex app-server`.
 - Stored data is limited to usage percentages, settings, diagnostics, and history metadata.
-

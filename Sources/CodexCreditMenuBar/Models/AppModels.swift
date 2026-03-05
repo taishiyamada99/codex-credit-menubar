@@ -62,57 +62,44 @@ enum LanguageMode: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+enum LongTermRetention: String, Codable, CaseIterable, Identifiable {
+    case oneYear
+    case twoYears
+    case fiveYears
+    case unlimited
+
+    var id: String { rawValue }
+
+    var retentionDays: Int? {
+        switch self {
+        case .oneYear:
+            return 365
+        case .twoYears:
+            return 730
+        case .fiveYears:
+            return 1_825
+        case .unlimited:
+            return nil
+        }
+    }
+}
+
 enum SnapshotSource: String, Codable {
     case exact
     case carriedForward
-}
-
-enum AliasField: String, Codable, CaseIterable, Identifiable {
-    case limitId
-    case limitName
-
-    var id: String { rawValue }
-}
-
-struct LimitAliasRule: Codable, Identifiable, Hashable {
-    var id: UUID
-    var pattern: String
-    var field: AliasField
-    var targetKind: BucketKind
-    var enabled: Bool
-    var priority: Int
-
-    init(
-        id: UUID = UUID(),
-        pattern: String,
-        field: AliasField,
-        targetKind: BucketKind,
-        enabled: Bool = true,
-        priority: Int = 100
-    ) {
-        self.id = id
-        self.pattern = pattern
-        self.field = field
-        self.targetKind = targetKind
-        self.enabled = enabled
-        self.priority = priority
-    }
 }
 
 struct AppSettings: Codable, Equatable {
     var sourceMode: SourceMode
     var customCodexPath: String
     var visibleKinds: [BucketKind]
-    var inlineMaxCount: Int
-    var privacyMode: Bool
-    var notificationsEnabled: Bool
-    var thresholdPercents: [Int]
     var languageMode: LanguageMode
     var startAtLogin: Bool
     var lastSnapshotDateKey: String?
+    var lastShortSlotEpoch: Int64?
+    var lastLongTermDayKeyGMT: String?
     var refreshIntervalMinutes: Int
-    var retentionDays: Int
-    var aliasRules: [LimitAliasRule]
+    var longTermRetention: LongTermRetention
 
     static let settingsKey = "app_settings"
 
@@ -120,17 +107,77 @@ struct AppSettings: Codable, Equatable {
         sourceMode: .autoDesktopFirst,
         customCodexPath: "",
         visibleKinds: [.sevenDay],
-        inlineMaxCount: 5,
-        privacyMode: false,
-        notificationsEnabled: true,
-        thresholdPercents: [20, 10, 5],
         languageMode: .en,
         startAtLogin: false,
         lastSnapshotDateKey: nil,
+        lastShortSlotEpoch: nil,
+        lastLongTermDayKeyGMT: nil,
         refreshIntervalMinutes: 5,
-        retentionDays: 180,
-        aliasRules: []
+        longTermRetention: .twoYears
     )
+
+    enum CodingKeys: String, CodingKey {
+        case sourceMode
+        case customCodexPath
+        case visibleKinds
+        case languageMode
+        case startAtLogin
+        case lastSnapshotDateKey
+        case lastShortSlotEpoch
+        case lastLongTermDayKeyGMT
+        case refreshIntervalMinutes
+        case longTermRetention
+    }
+
+    init(
+        sourceMode: SourceMode,
+        customCodexPath: String,
+        visibleKinds: [BucketKind],
+        languageMode: LanguageMode,
+        startAtLogin: Bool,
+        lastSnapshotDateKey: String?,
+        lastShortSlotEpoch: Int64?,
+        lastLongTermDayKeyGMT: String?,
+        refreshIntervalMinutes: Int,
+        longTermRetention: LongTermRetention
+    ) {
+        self.sourceMode = sourceMode
+        self.customCodexPath = customCodexPath
+        self.visibleKinds = visibleKinds
+        self.languageMode = languageMode
+        self.startAtLogin = startAtLogin
+        self.lastSnapshotDateKey = lastSnapshotDateKey
+        self.lastShortSlotEpoch = lastShortSlotEpoch
+        self.lastLongTermDayKeyGMT = lastLongTermDayKeyGMT
+        self.refreshIntervalMinutes = refreshIntervalMinutes
+        self.longTermRetention = longTermRetention
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = AppSettings.default
+
+        sourceMode = try container.decodeIfPresent(SourceMode.self, forKey: .sourceMode) ?? defaults.sourceMode
+        customCodexPath = try container.decodeIfPresent(String.self, forKey: .customCodexPath) ?? defaults.customCodexPath
+        visibleKinds = try container.decodeIfPresent([BucketKind].self, forKey: .visibleKinds) ?? defaults.visibleKinds
+        languageMode = try container.decodeIfPresent(LanguageMode.self, forKey: .languageMode) ?? defaults.languageMode
+        startAtLogin = try container.decodeIfPresent(Bool.self, forKey: .startAtLogin) ?? defaults.startAtLogin
+        lastSnapshotDateKey = try container.decodeIfPresent(String.self, forKey: .lastSnapshotDateKey)
+        lastShortSlotEpoch = try container.decodeIfPresent(Int64.self, forKey: .lastShortSlotEpoch)
+        lastLongTermDayKeyGMT = try container.decodeIfPresent(String.self, forKey: .lastLongTermDayKeyGMT)
+        refreshIntervalMinutes = try container.decodeIfPresent(Int.self, forKey: .refreshIntervalMinutes) ?? defaults.refreshIntervalMinutes
+        longTermRetention = try container.decodeIfPresent(LongTermRetention.self, forKey: .longTermRetention) ?? defaults.longTermRetention
+    }
+}
+
+struct RawBucketSample: Hashable {
+    let limitId: String
+    let limitName: String
+    let kind: BucketKind
+    let remainingPercent: Double
+    let usedPercent: Double
+    let resetsAt: Date?
+    let source: SnapshotSource
 }
 
 struct LimitBucket: Identifiable, Hashable {
@@ -199,10 +246,7 @@ enum ServiceEvent: Hashable {
 
 enum SettingsTab: String, CaseIterable, Identifiable {
     case general
-    case display
-    case history
-    case notifications
-    case language
+    case usage
     case diagnostics
 
     var id: String { rawValue }

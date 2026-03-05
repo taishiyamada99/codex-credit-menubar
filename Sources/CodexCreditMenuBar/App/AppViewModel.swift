@@ -1,11 +1,17 @@
 import AppKit
-import Combine
 import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
 
 @MainActor
 final class AppViewModel: ObservableObject {
+    enum ManualRefreshState: Equatable {
+        case idle
+        case refreshing(Date)
+        case success(Date)
+        case failed(Date, String?)
+    }
+
     @Published var settings: AppSettings
     @Published var serviceState: ServiceState
     @Published var summaries: [BucketSummary]
@@ -14,20 +20,22 @@ final class AppViewModel: ObservableObject {
     @Published var historyRangeDays: Int
     @Published var historyKinds: Set<BucketKind>
     @Published var activeSettingsTab: SettingsTab
+    @Published var manualRefreshState: ManualRefreshState
 
     private let classification = ClassificationEngine()
     private let database: AppDatabase
-    private let notifier: ThresholdNotificationService
     private let service: CodexRateLimitService
     private let startAtLoginManager = StartAtLoginManager()
 
     private var streamTask: Task<Void, Never>?
-    private var snapshotTask: Task<Void, Never>?
+    private var shortSamplingTask: Task<Void, Never>?
+    private var longTermSamplingTask: Task<Void, Never>?
+    private var manualRefreshTimeoutTask: Task<Void, Never>?
+    private var pendingManualRefreshToken: UUID?
 
     init() {
         let db = AppDatabase()
         self.database = db
-        self.notifier = ThresholdNotificationService(database: db)
         self.settings = .default
         self.serviceState = .initial
         self.summaries = []
@@ -36,6 +44,7 @@ final class AppViewModel: ObservableObject {
         self.historyRangeDays = 30
         self.historyKinds = Set(BucketKind.fallbackCases)
         self.activeSettingsTab = .general
+        self.manualRefreshState = .idle
 
         self.service = CodexRateLimitService(settings: .default) { [db] level, code, message in
             Task {
@@ -48,7 +57,9 @@ final class AppViewModel: ObservableObject {
 
     deinit {
         streamTask?.cancel()
-        snapshotTask?.cancel()
+        shortSamplingTask?.cancel()
+        longTermSamplingTask?.cancel()
+        manualRefreshTimeoutTask?.cancel()
         let service = service
         Task {
             await service.stop()
@@ -80,6 +91,36 @@ final class AppViewModel: ObservableObject {
             return localized(.healthStale)
         case .error:
             return localized(.healthError)
+        }
+    }
+
+    var manualRefreshSummaryText: String? {
+        switch manualRefreshState {
+        case .idle:
+            return nil
+        case .refreshing:
+            return "\(localized(.manualRefresh)): \(localized(.refreshing))"
+        case let .success(at):
+            return "\(localized(.manualRefresh)): \(localized(.refreshSuccess)) — \(DateUtils.dateTimeFormatter.string(from: at))"
+        case let .failed(at, message):
+            let base = "\(localized(.manualRefresh)): \(localized(.refreshFailed)) — \(DateUtils.dateTimeFormatter.string(from: at))"
+            guard let message, !message.isEmpty else {
+                return base
+            }
+            return "\(base) (\(message))"
+        }
+    }
+
+    var manualRefreshSummaryColor: Color {
+        switch manualRefreshState {
+        case .idle:
+            return .secondary
+        case .refreshing:
+            return .secondary
+        case .success:
+            return .green
+        case .failed:
+            return .red
         }
     }
 
@@ -118,6 +159,19 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func longTermRetentionTitle(_ retention: LongTermRetention) -> String {
+        switch retention {
+        case .oneYear:
+            return localized(.retentionOneYear)
+        case .twoYears:
+            return localized(.retentionTwoYears)
+        case .fiveYears:
+            return localized(.retentionFiveYears)
+        case .unlimited:
+            return localized(.retentionUnlimited)
+        }
+    }
+
     func label(for kind: BucketKind) -> String {
         switch kind {
         case .fiveHour:
@@ -136,7 +190,7 @@ final class AppViewModel: ObservableObject {
     func trendDelta(for kind: BucketKind) -> Double? {
         let points = historyPoints
             .filter { $0.kind == kind }
-            .sorted { $0.dateLocal < $1.dateLocal }
+            .sorted { $0.capturedAt < $1.capturedAt }
         guard points.count >= 2 else {
             return nil
         }
@@ -150,8 +204,7 @@ final class AppViewModel: ObservableObject {
             summaries: summaries,
             settings: settings,
             serviceState: serviceState,
-            effectiveStatus: effectiveStatus,
-            privacyMask: localized(.menuPrivacyMasked)
+            effectiveStatus: effectiveStatus
         )
     }
 
@@ -159,8 +212,7 @@ final class AppViewModel: ObservableObject {
         summaries: [BucketSummary],
         settings: AppSettings,
         serviceState: ServiceState,
-        effectiveStatus: AppHealthStatus,
-        privacyMask: String
+        effectiveStatus: AppHealthStatus
     ) -> String {
         if summaries.isEmpty {
             if serviceState.authRequired {
@@ -188,24 +240,22 @@ final class AppViewModel: ObservableObject {
         let filteredKinds = settings.visibleKinds
             .filter { fallbackAvailable.contains($0) && selectedSeen.insert($0).inserted }
         let kinds = filteredKinds.isEmpty ? [fallbackAvailable[0]] : filteredKinds
-        let visibleCount = max(1, min(settings.inlineMaxCount, 5))
+        let visibleCount = 3
         let items = kinds.prefix(visibleCount)
 
         let texts = items.compactMap { kind -> String? in
             guard let summary = byKind[kind] else {
                 return nil
             }
-            let suffix = settings.privacyMode
-                ? privacyMask
-                : DateUtils.displayPercent(summary.primary.remainingPercent)
-            return "\(summary.shortLabel) \(suffix)"
+            let suffix = DateUtils.displayPercent(summary.primary.remainingPercent)
+            return "\(summary.shortLabel)\(suffix)"
         }
 
         if texts.isEmpty {
             return "--"
         }
 
-        var title = texts.joined(separator: " | ")
+        var title = texts.joined(separator: " ")
         if kinds.count > visibleCount {
             let hidden = kinds.count - visibleCount
             title += " +\(hidden)"
@@ -221,6 +271,15 @@ final class AppViewModel: ObservableObject {
     func setLanguageMode(_ mode: LanguageMode) {
         settings.languageMode = mode
         persistSettingsAndApply()
+    }
+
+    func setLongTermRetention(_ retention: LongTermRetention) {
+        settings.longTermRetention = retention
+        persistSettingsAndApply(applySource: false)
+        Task {
+            await database.pruneLongTermRawDaily(retention: retention)
+            await reloadHistory()
+        }
     }
 
     func setCustomCodexPath(_ path: String) {
@@ -241,28 +300,6 @@ final class AppViewModel: ObservableObject {
         persistSettingsAndApply(applySource: false)
     }
 
-    func setNotificationsEnabled(_ enabled: Bool) {
-        settings.notificationsEnabled = enabled
-        persistSettingsAndApply(applySource: false)
-    }
-
-    func updateThresholds(_ values: [Int]) {
-        settings.thresholdPercents = values
-        persistSettingsAndApply(applySource: false)
-    }
-
-    func setPrivacyMode(_ enabled: Bool) {
-        settings.privacyMode = enabled
-        persistSettingsAndApply(applySource: false)
-    }
-
-    func setInlineMaxCount(_ count: Int) {
-        let clamped = min(max(count, 1), 5)
-        let requiredForSelection = min(5, normalizedVisibleKinds(settings.visibleKinds, allowedKinds: selectableKinds).count)
-        settings.inlineMaxCount = max(clamped, requiredForSelection)
-        persistSettingsAndApply(applySource: false)
-    }
-
     func setVisibleKind(_ kind: BucketKind, isVisible: Bool) {
         guard selectableKinds.contains(kind) else {
             return
@@ -276,7 +313,6 @@ final class AppViewModel: ObservableObject {
         }
         let normalizedKinds = normalizedVisibleKinds(kinds, allowedKinds: selectableKinds)
         settings.visibleKinds = normalizedKinds
-        settings.inlineMaxCount = max(settings.inlineMaxCount, min(5, normalizedKinds.count))
         persistSettingsAndApply(applySource: false)
     }
 
@@ -315,33 +351,28 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func addAliasRule() {
-        settings.aliasRules.append(LimitAliasRule(
-            pattern: "",
-            field: .limitId,
-            targetKind: .sevenDay,
-            enabled: true,
-            priority: 100
-        ))
-        persistAliasRulesOnly()
-    }
-
-    func removeAliasRule(id: UUID) {
-        settings.aliasRules.removeAll { $0.id == id }
-        persistAliasRulesOnly()
-        recomputeSummaries()
-    }
-
-    func updateAliasRule(_ rule: LimitAliasRule) {
-        guard let index = settings.aliasRules.firstIndex(where: { $0.id == rule.id }) else {
-            return
-        }
-        settings.aliasRules[index] = normalizedAliasRule(rule)
-        persistAliasRulesOnly()
-        recomputeSummaries()
-    }
-
     func refreshNow() {
+        let token = UUID()
+        pendingManualRefreshToken = token
+        manualRefreshState = .refreshing(Date())
+        manualRefreshTimeoutTask?.cancel()
+        manualRefreshTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 20_000_000_000)
+            guard !Task.isCancelled else {
+                return
+            }
+            await MainActor.run {
+                guard let self else {
+                    return
+                }
+                guard self.pendingManualRefreshToken == token else {
+                    return
+                }
+                self.pendingManualRefreshToken = nil
+                self.manualRefreshState = .failed(Date(), nil)
+            }
+        }
+
         Task {
             await service.refreshNow()
         }
@@ -355,20 +386,20 @@ final class AppViewModel: ObservableObject {
         NSApp.terminate(nil)
     }
 
-    func requestNotificationPermission() {
-        Task {
-            await notifier.requestAuthorizationIfNeeded()
-        }
-    }
-
-    func openSystemNotificationSettings() {
-        notifier.openSystemNotificationSettings()
-    }
-
     func refreshDiagnosticsNow() {
         Task {
             await reloadDiagnostics()
         }
+    }
+
+    func copyDiagnosticsToClipboard() {
+        let lines = diagnostics.map { item in
+            let timestamp = DateUtils.dateTimeFormatter.string(from: item.createdAt)
+            return "[\(item.level.uppercased())] \(item.code) \(timestamp)\n\(item.message)"
+        }
+        let content = lines.joined(separator: "\n\n")
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(content, forType: .string)
     }
 
     func setActiveSettingsTab(_ tab: SettingsTab) {
@@ -409,47 +440,41 @@ final class AppViewModel: ObservableObject {
                 switch event {
                 case let .state(state):
                     serviceState = state
+                    applyManualRefreshResultIfNeeded(from: state)
                     recomputeSummaries(rawBuckets: state.buckets)
                     syncKindsToAvailable()
-                    await maybePersistSnapshotIfDue()
-                    await notifier.evaluate(
-                        summaries: summaries.filter { selectableKinds.contains($0.kind) },
-                        thresholds: settings.thresholdPercents,
-                        enabled: settings.notificationsEnabled,
-                        languageMode: settings.languageMode
-                    )
+                    await maybePersistShortRawIfDue()
+                    await maybePersistLongTermRawIfDue()
                 case .disconnected:
                     break
                 }
             }
         }
 
-        snapshotTask = Task {
+        shortSamplingTask = Task {
             while !Task.isCancelled {
-                await maybePersistSnapshotIfDue()
-                let delaySeconds = nextSnapshotCheckDelaySeconds()
-                try? await Task.sleep(nanoseconds: UInt64(delaySeconds) * 1_000_000_000)
+                await maybePersistShortRawIfDue()
+                let nextBoundary = DateUtils.nextFiveMinuteBoundary()
+                let delay = max(5, nextBoundary.timeIntervalSinceNow)
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+        }
+
+        longTermSamplingTask = Task {
+            while !Task.isCancelled {
+                await maybePersistLongTermRawIfDue()
+                let nextMidnight = DateUtils.nextGMTMidnight()
+                let delay = max(30, nextMidnight.timeIntervalSinceNow)
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
         }
 
         Task {
             let loaded = await database.loadSettings()
-            let storedRules = await database.loadAliasRules()
             let originalSettings = loaded
-            var shouldPersistAliasRules = false
 
             settings = loaded
             settings.visibleKinds = normalizedVisibleKinds(settings.visibleKinds, allowedKinds: BucketKind.fallbackCases)
-            let normalizedInline = min(max(settings.inlineMaxCount, 1), 5)
-            settings.inlineMaxCount = max(normalizedInline, min(5, settings.visibleKinds.count))
-            if !storedRules.isEmpty {
-                settings.aliasRules = storedRules
-            }
-            let normalizedRules = normalizedAliasRules(settings.aliasRules)
-            if normalizedRules != settings.aliasRules {
-                settings.aliasRules = normalizedRules
-                shouldPersistAliasRules = true
-            }
             historyKinds = Set(BucketKind.fallbackCases)
 
             let startAtLogin = startAtLoginManager.isEnabled()
@@ -460,13 +485,9 @@ final class AppViewModel: ObservableObject {
             if settings != originalSettings {
                 await database.saveSettings(settings)
             }
-            if shouldPersistAliasRules {
-                await database.saveAliasRules(settings.aliasRules)
-            }
 
             await reloadDiagnostics()
             await reloadHistory()
-            await notifier.requestAuthorizationIfNeeded()
             await service.applySettings(settings)
             await service.start()
         }
@@ -479,6 +500,24 @@ final class AppViewModel: ObservableObject {
         return unique.isEmpty ? [allowedKinds.first ?? .sevenDay] : unique
     }
 
+    private func applyManualRefreshResultIfNeeded(from state: ServiceState) {
+        guard pendingManualRefreshToken != nil else {
+            return
+        }
+        switch state.status {
+        case .ok:
+            manualRefreshTimeoutTask?.cancel()
+            pendingManualRefreshToken = nil
+            manualRefreshState = .success(state.lastUpdatedAt ?? Date())
+        case .error:
+            manualRefreshTimeoutTask?.cancel()
+            pendingManualRefreshToken = nil
+            manualRefreshState = .failed(Date(), state.message)
+        case .loading, .stale:
+            break
+        }
+    }
+
     private func syncKindsToAvailable() {
         let allowedKinds = selectableKinds
         let normalizedVisible = normalizedVisibleKinds(settings.visibleKinds, allowedKinds: allowedKinds)
@@ -488,7 +527,6 @@ final class AppViewModel: ObservableObject {
         var historyChanged = false
         if normalizedVisible != settings.visibleKinds {
             settings.visibleKinds = normalizedVisible
-            settings.inlineMaxCount = max(settings.inlineMaxCount, min(5, normalizedVisible.count))
             changed = true
         }
 
@@ -507,22 +545,9 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func normalizedAliasRules(_ rules: [LimitAliasRule]) -> [LimitAliasRule] {
-        rules.map { normalizedAliasRule($0) }
-    }
-
-    private func normalizedAliasRule(_ rule: LimitAliasRule) -> LimitAliasRule {
-        guard rule.targetKind == .custom else {
-            return rule
-        }
-        var updated = rule
-        updated.targetKind = .sevenDay
-        return updated
-    }
-
     private func recomputeSummaries(rawBuckets: [LimitBucket]? = nil) {
         let buckets = rawBuckets ?? serviceState.buckets
-        summaries = classification.summarize(buckets: buckets, rules: settings.aliasRules)
+        summaries = classification.summarize(buckets: buckets)
     }
 
     private func persistSettingsAndApply(applySource: Bool = true) {
@@ -535,80 +560,110 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func persistAliasRulesOnly() {
-        let settingsCopy = settings
-        Task {
-            await database.saveSettings(settingsCopy)
-            await database.saveAliasRules(settingsCopy.aliasRules)
+    private func buildRawSamples(source: SnapshotSource) -> [RawBucketSample] {
+        return serviceState.buckets.map { bucket in
+            let kind = classification.classify(bucket: bucket)
+            return RawBucketSample(
+                // Preserve both primary/secondary windows even when they share the same limitId.
+                limitId: Self.storageLimitIdentifier(for: bucket),
+                limitName: bucket.limitName,
+                kind: kind,
+                remainingPercent: bucket.remainingPercent,
+                usedPercent: bucket.usedPercent,
+                resetsAt: bucket.resetsAt,
+                source: source
+            )
         }
     }
 
-    private func maybePersistSnapshotIfDue() async {
-        guard !summaries.isEmpty else {
+    nonisolated static func storageLimitIdentifier(for bucket: LimitBucket) -> String {
+        let windowPart = bucket.windowDurationMins.map(String.init) ?? "na"
+        let resetPart = bucket.resetsAt.map { String(Int($0.timeIntervalSince1970)) } ?? "na"
+        return "\(bucket.limitId)#w\(windowPart)#r\(resetPart)"
+    }
+
+    private func maybePersistShortRawIfDue() async {
+        guard !serviceState.buckets.isEmpty else {
             return
         }
-
-        let todayKey = DateUtils.localDateKey()
-        if settings.lastSnapshotDateKey == todayKey {
-            return
-        }
-
-        guard DateUtils.nowPastSnapshotTime(hour: 2) else {
-            return
-        }
-
+        let slotEpoch = DateUtils.fiveMinuteSlotEpoch()
         let source: SnapshotSource = serviceState.lastUpdatedAt != nil ? .exact : .carriedForward
-        let now = Date()
-
-        let points = summaries
-            .filter { selectableKinds.contains($0.kind) }
-            .map { summary in
-                SnapshotPoint(
-                    id: "\(todayKey)-\(summary.kind.rawValue)",
-                    dateLocal: todayKey,
-                    capturedAt: now,
-                    kind: summary.kind,
-                    limitId: summary.primary.limitId,
-                    remainingPercent: summary.primary.remainingPercent,
-                    usedPercent: summary.primary.usedPercent,
-                    source: source
-                )
-            }
-
-        guard !points.isEmpty else {
+        let samples = buildRawSamples(source: source)
+        guard !samples.isEmpty else {
             return
         }
-
-        await database.saveSnapshotPoints(points)
-        await database.pruneSnapshots(olderThanDays: settings.retentionDays)
-
-        settings.lastSnapshotDateKey = todayKey
+        if settings.lastShortSlotEpoch == slotEpoch {
+            let existingCount = await database.countShortRawSamples(slotEpoch: slotEpoch)
+            if existingCount >= samples.count {
+                return
+            }
+        }
+        await database.saveShortRawSamples(
+            slotEpoch: slotEpoch,
+            capturedAt: Date(timeIntervalSince1970: TimeInterval(slotEpoch)),
+            samples: samples
+        )
+        let shortRetentionSeconds: Int64 = 28 * 24 * 60 * 60
+        await database.pruneShortRawSamples(olderThanSlotEpoch: slotEpoch - shortRetentionSeconds)
+        settings.lastShortSlotEpoch = slotEpoch
         await database.saveSettings(settings)
-        await reloadHistory()
+        if historyRangeDays <= 30 {
+            await reloadHistory()
+        }
     }
 
-    private func nextSnapshotCheckDelaySeconds() -> Int {
-        let now = Date()
-        if summaries.isEmpty {
-            return 15 * 60
+    private func maybePersistLongTermRawIfDue() async {
+        guard !serviceState.buckets.isEmpty else {
+            return
         }
-
-        let todayKey = DateUtils.localDateKey(from: now)
-        if settings.lastSnapshotDateKey == todayKey {
-            let next = DateUtils.nextSnapshotDate(hour: 2)
-            return max(5 * 60, Int(next.timeIntervalSince(now)))
+        let dayKeyGMT = DateUtils.gmtDateKey()
+        let source: SnapshotSource = serviceState.lastUpdatedAt != nil ? .exact : .carriedForward
+        let samples = buildRawSamples(source: source)
+        guard !samples.isEmpty else {
+            return
         }
-
-        if DateUtils.nowPastSnapshotTime(hour: 2) {
-            return 5 * 60
+        if settings.lastLongTermDayKeyGMT == dayKeyGMT {
+            let existingCount = await database.countLongTermRawSamples(dayKeyGMT: dayKeyGMT)
+            if existingCount >= samples.count {
+                return
+            }
         }
-
-        let next = DateUtils.nextSnapshotDate(hour: 2)
-        return max(60, Int(next.timeIntervalSince(now)))
+        await database.saveLongTermRawDaily(dayKeyGMT: dayKeyGMT, capturedAt: Date(), samples: samples)
+        await database.pruneLongTermRawDaily(retention: settings.longTermRetention)
+        settings.lastLongTermDayKeyGMT = dayKeyGMT
+        await database.saveSettings(settings)
+        if historyRangeDays >= 30 {
+            await reloadHistory()
+        }
     }
 
     private func reloadHistory() async {
-        let points = await database.fetchSnapshots(days: historyRangeDays, kinds: historyKinds)
+        let now = Date()
+        if historyRangeDays <= 30 {
+            let cutoffDate = now.addingTimeInterval(-Double(historyRangeDays * 24 * 60 * 60))
+            let cutoffSlot = DateUtils.fiveMinuteSlotEpoch(from: cutoffDate)
+            var points = await database.fetchShortRawHistory(fromSlotEpoch: cutoffSlot, kinds: historyKinds)
+
+            if historyRangeDays > 28 {
+                let longCutoffDate = now.addingTimeInterval(-Double(historyRangeDays * 24 * 60 * 60))
+                let longCutoffDay = DateUtils.gmtDateKey(from: longCutoffDate)
+                let shortWindowStart = now.addingTimeInterval(-Double(28 * 24 * 60 * 60))
+                let longPoints = await database.fetchLongTermRawHistory(fromDayKeyGMT: longCutoffDay, kinds: historyKinds)
+                points.append(contentsOf: longPoints.filter { $0.capturedAt < shortWindowStart })
+            }
+
+            historyPoints = points.sorted { lhs, rhs in
+                if lhs.capturedAt == rhs.capturedAt {
+                    return lhs.kind.rawValue < rhs.kind.rawValue
+                }
+                return lhs.capturedAt < rhs.capturedAt
+            }
+            return
+        }
+
+        let cutoffDate = now.addingTimeInterval(-Double(historyRangeDays * 24 * 60 * 60))
+        let cutoffDay = DateUtils.gmtDateKey(from: cutoffDate)
+        let points = await database.fetchLongTermRawHistory(fromDayKeyGMT: cutoffDay, kinds: historyKinds)
         historyPoints = points
     }
 

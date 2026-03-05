@@ -26,8 +26,8 @@ final class ClassificationEngineTests: XCTestCase {
             hasSecondary: false
         )
 
-        XCTAssertEqual(engine.classify(bucket: bucket5h, rules: []), .fiveHour)
-        XCTAssertEqual(engine.classify(bucket: bucket7d, rules: []), .sevenDay)
+        XCTAssertEqual(engine.classify(bucket: bucket5h), .fiveHour)
+        XCTAssertEqual(engine.classify(bucket: bucket7d), .sevenDay)
     }
 
     func testWindowBasedClassificationAllowsNearValues() {
@@ -52,8 +52,8 @@ final class ClassificationEngineTests: XCTestCase {
             hasSecondary: false
         )
 
-        XCTAssertEqual(engine.classify(bucket: near5h, rules: []), .fiveHour)
-        XCTAssertEqual(engine.classify(bucket: near7d, rules: []), .sevenDay)
+        XCTAssertEqual(engine.classify(bucket: near5h), .fiveHour)
+        XCTAssertEqual(engine.classify(bucket: near7d), .sevenDay)
     }
 
     func testNameBasedClassification() {
@@ -78,8 +78,8 @@ final class ClassificationEngineTests: XCTestCase {
             hasSecondary: false
         )
 
-        XCTAssertEqual(engine.classify(bucket: review, rules: []), .review)
-        XCTAssertEqual(engine.classify(bucket: spark, rules: []), .gptSpark)
+        XCTAssertEqual(engine.classify(bucket: review), .review)
+        XCTAssertEqual(engine.classify(bucket: spark), .gptSpark)
     }
 
     func testBengalfoxIdClassifiedAsSpark() {
@@ -93,29 +93,7 @@ final class ClassificationEngineTests: XCTestCase {
             updatedAt: nil,
             hasSecondary: false
         )
-        XCTAssertEqual(engine.classify(bucket: bucket, rules: []), .gptSpark)
-    }
-
-    func testAliasRuleOverridesBuiltin() {
-        let bucket = LimitBucket(
-            limitId: "foo-review",
-            limitName: "Review",
-            usedPercent: 10,
-            remainingPercent: 90,
-            windowDurationMins: nil,
-            resetsAt: nil,
-            updatedAt: nil,
-            hasSecondary: false
-        )
-        let rule = LimitAliasRule(
-            pattern: "foo-review",
-            field: .limitId,
-            targetKind: .custom,
-            enabled: true,
-            priority: 1
-        )
-
-        XCTAssertEqual(engine.classify(bucket: bucket, rules: [rule]), .custom)
+        XCTAssertEqual(engine.classify(bucket: bucket), .gptSpark)
     }
 
     func testSummariesUseMostConstrainedPrimary() {
@@ -140,7 +118,7 @@ final class ClassificationEngineTests: XCTestCase {
             hasSecondary: false
         )
 
-        let summaries = engine.summarize(buckets: [a, b], rules: [])
+        let summaries = engine.summarize(buckets: [a, b])
         XCTAssertEqual(summaries.count, 1)
         XCTAssertEqual(summaries.first?.kind, .sevenDay)
         XCTAssertEqual(summaries.first?.primary.limitId, "a")

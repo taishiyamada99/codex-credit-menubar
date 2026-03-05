@@ -8,6 +8,8 @@ BUILD_DIR="${ROOT_DIR}/.build/arm64-apple-macosx/release"
 OUTPUT_DIR="${ROOT_DIR}/output"
 APP_DIR="${OUTPUT_DIR}/${BUNDLE_NAME}"
 EXECUTABLE_PATH="${BUILD_DIR}/${APP_NAME}"
+ICON_NAME="AppIcon"
+ICON_PATH="${APP_DIR}/Contents/Resources/${ICON_NAME}.icns"
 
 mkdir -p "${OUTPUT_DIR}"
 
@@ -24,6 +26,7 @@ mkdir -p "${APP_DIR}/Contents/Resources"
 
 cp "${EXECUTABLE_PATH}" "${APP_DIR}/Contents/MacOS/${APP_NAME}"
 chmod +x "${APP_DIR}/Contents/MacOS/${APP_NAME}"
+"${ROOT_DIR}/scripts/build_app_icon.sh" "${ICON_PATH}"
 
 cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -34,6 +37,10 @@ cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
   <string>en</string>
   <key>CFBundleExecutable</key>
   <string>${APP_NAME}</string>
+  <key>CFBundleIconFile</key>
+  <string>${ICON_NAME}</string>
+  <key>CFBundleIconName</key>
+  <string>${ICON_NAME}</string>
   <key>CFBundleIdentifier</key>
   <string>dev.codex.${APP_NAME}</string>
   <key>CFBundleInfoDictionaryVersion</key>
@@ -43,9 +50,9 @@ cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>0.1.1</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>2</string>
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>
   <key>LSUIElement</key>

@@ -5,15 +5,17 @@ import SwiftUI
 final class SettingsWindowManager {
     static let shared = SettingsWindowManager()
 
+    private let defaultSize = NSSize(width: 900, height: 700)
+    private let minimumSize = NSSize(width: 820, height: 620)
+
     private var window: NSWindow?
 
     private init() {}
 
     func show(viewModel: AppViewModel) {
         if window == nil {
-            let size = targetSize(for: viewModel.activeSettingsTab)
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: size.width, height: size.height),
+                contentRect: NSRect(x: 0, y: 0, width: defaultSize.width, height: defaultSize.height),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered,
                 defer: false
@@ -21,6 +23,7 @@ final class SettingsWindowManager {
             window.title = viewModel.localized(.settings)
             window.setFrameAutosaveName("CodexCreditMenuBar.SettingsWindow")
             window.isReleasedWhenClosed = false
+            window.contentMinSize = minimumSize
             self.window = window
         }
 
@@ -35,23 +38,7 @@ final class SettingsWindowManager {
         guard let window else {
             return
         }
-        let size = targetSize(for: tab)
-        window.contentMinSize = NSSize(width: size.minWidth, height: size.minHeight)
-        window.setContentSize(NSSize(width: size.width, height: size.height))
-    }
-
-    private func targetSize(for tab: SettingsTab) -> (width: CGFloat, height: CGFloat, minWidth: CGFloat, minHeight: CGFloat) {
-        switch tab {
-        case .general, .language:
-            return (560, 380, 500, 340)
-        case .display:
-            return (620, 430, 540, 360)
-        case .history:
-            return (680, 460, 580, 400)
-        case .notifications:
-            return (580, 390, 500, 340)
-        case .diagnostics:
-            return (680, 460, 580, 400)
-        }
+        _ = tab
+        window.contentMinSize = minimumSize
     }
 }

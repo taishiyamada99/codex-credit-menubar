@@ -9,6 +9,20 @@ enum DateUtils {
         return formatter
     }()
 
+    private static let gmtDayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter
+    }()
+
+    private static let gmtCalendar: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .gmt
+        return calendar
+    }()
+
     static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.timeStyle = .short
@@ -33,6 +47,37 @@ enum DateUtils {
 
     static func dateFromLocalDateKey(_ key: String) -> Date? {
         localDayFormatter.date(from: key)
+    }
+
+    static func gmtDateKey(from date: Date = Date()) -> String {
+        gmtDayFormatter.string(from: date)
+    }
+
+    static func dateFromGMTDateKey(_ key: String) -> Date? {
+        gmtDayFormatter.date(from: key)
+    }
+
+    static func nextGMTMidnight(from date: Date = Date()) -> Date {
+        var next = gmtCalendar.date(
+            bySettingHour: 0,
+            minute: 0,
+            second: 0,
+            of: date
+        ) ?? date
+        if next <= date {
+            next = gmtCalendar.date(byAdding: .day, value: 1, to: next) ?? date
+        }
+        return next
+    }
+
+    static func fiveMinuteSlotEpoch(from date: Date = Date()) -> Int64 {
+        let epoch = Int64(date.timeIntervalSince1970)
+        return epoch - (epoch % 300)
+    }
+
+    static func nextFiveMinuteBoundary(from date: Date = Date()) -> Date {
+        let slot = fiveMinuteSlotEpoch(from: date)
+        return Date(timeIntervalSince1970: TimeInterval(slot + 300))
     }
 
     static func isStale(lastUpdated: Date?, thresholdMinutes: Int = 15) -> Bool {

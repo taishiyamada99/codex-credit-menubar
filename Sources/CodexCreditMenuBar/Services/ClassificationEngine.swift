@@ -1,12 +1,9 @@
 import Foundation
 
 struct ClassificationEngine {
-    func summarize(
-        buckets: [LimitBucket],
-        rules: [LimitAliasRule]
-    ) -> [BucketSummary] {
+    func summarize(buckets: [LimitBucket]) -> [BucketSummary] {
         let grouped = Dictionary(grouping: buckets) { bucket in
-            classify(bucket: bucket, rules: rules)
+            classify(bucket: bucket)
         }
 
         let summaries = grouped.compactMap { kind, values -> BucketSummary? in
@@ -44,18 +41,7 @@ struct ClassificationEngine {
         }
     }
 
-    func classify(bucket: LimitBucket, rules: [LimitAliasRule]) -> BucketKind {
-        let activeRules = rules
-            .filter(\.enabled)
-            .sorted { $0.priority < $1.priority }
-
-        for rule in activeRules {
-            let value = rule.field == .limitId ? bucket.limitId : bucket.limitName
-            if matches(value: value, pattern: rule.pattern) {
-                return rule.targetKind
-            }
-        }
-
+    func classify(bucket: LimitBucket) -> BucketKind {
         let id = bucket.limitId.lowercased()
         let name = bucket.limitName.lowercased()
         if id.contains("review") || name.contains("review") {
@@ -81,20 +67,6 @@ struct ClassificationEngine {
         }
 
         return .custom
-    }
-
-    private func matches(value: String, pattern: String) -> Bool {
-        let target = value.lowercased()
-        let regexPattern = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !regexPattern.isEmpty else {
-            return false
-        }
-
-        if let regex = try? NSRegularExpression(pattern: regexPattern, options: [.caseInsensitive]) {
-            let range = NSRange(location: 0, length: target.utf16.count)
-            return regex.firstMatch(in: target, options: [], range: range) != nil
-        }
-        return target.contains(regexPattern.lowercased())
     }
 
     private func order(of kind: BucketKind) -> Int {

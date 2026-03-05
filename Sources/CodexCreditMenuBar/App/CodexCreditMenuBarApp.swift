@@ -5,11 +5,10 @@ struct CodexCreditMenuBarApp: App {
     @StateObject private var viewModel = AppViewModel()
 
     var body: some Scene {
-        MenuBarExtra {
+        MenuBarExtra(viewModel.menuBarTitle()) {
             MenuContentView(viewModel: viewModel)
-        } label: {
-            MenuBarLabelView(viewModel: viewModel)
         }
+        .menuBarExtraStyle(.menu)
 
         Settings {
             SettingsRootView(viewModel: viewModel)
