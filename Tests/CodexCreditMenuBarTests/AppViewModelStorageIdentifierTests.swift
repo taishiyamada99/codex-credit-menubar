@@ -30,4 +30,19 @@ final class AppViewModelStorageIdentifierTests: XCTestCase {
 
         XCTAssertNotEqual(primaryID, secondaryID)
     }
+
+    func testClampStorageTextTruncatesValuesLongerThanMaximum() {
+        let text = String(repeating: "x", count: 300)
+        let clamped = AppViewModel.clampStorageText(text, maxLength: 256)
+
+        XCTAssertEqual(clamped.count, 256)
+    }
+
+    func testClampStorageTextKeepsValuesWithinMaximum() {
+        let text = "codex-limit"
+        let clamped = AppViewModel.clampStorageText(text, maxLength: 256)
+
+        XCTAssertEqual(clamped, text)
+    }
+
 }
