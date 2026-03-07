@@ -5,6 +5,10 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class AppViewModel: ObservableObject {
+    private static let maxRawSamplesPerSnapshot = 200
+    private static let maxStorageLimitIdentifierLength = 256
+    private static let maxStorageLimitNameLength = 256
+
     enum ManualRefreshState: Equatable {
         case idle
         case refreshing(Date)
@@ -561,12 +565,15 @@ final class AppViewModel: ObservableObject {
     }
 
     private func buildRawSamples(source: SnapshotSource) -> [RawBucketSample] {
-        return serviceState.buckets.map { bucket in
+        return serviceState.buckets.prefix(Self.maxRawSamplesPerSnapshot).map { bucket in
             let kind = classification.classify(bucket: bucket)
             return RawBucketSample(
                 // Preserve both primary/secondary windows even when they share the same limitId.
-                limitId: Self.storageLimitIdentifier(for: bucket),
-                limitName: bucket.limitName,
+                limitId: Self.clampStorageText(
+                    Self.storageLimitIdentifier(for: bucket),
+                    maxLength: Self.maxStorageLimitIdentifierLength
+                ),
+                limitName: Self.clampStorageText(bucket.limitName, maxLength: Self.maxStorageLimitNameLength),
                 kind: kind,
                 remainingPercent: bucket.remainingPercent,
                 usedPercent: bucket.usedPercent,
@@ -580,6 +587,13 @@ final class AppViewModel: ObservableObject {
         let windowPart = bucket.windowDurationMins.map(String.init) ?? "na"
         let resetPart = bucket.resetsAt.map { String(Int($0.timeIntervalSince1970)) } ?? "na"
         return "\(bucket.limitId)#w\(windowPart)#r\(resetPart)"
+    }
+
+    nonisolated static func clampStorageText(_ text: String, maxLength: Int) -> String {
+        guard text.count > maxLength else {
+            return text
+        }
+        return String(text.prefix(maxLength))
     }
 
     private func maybePersistShortRawIfDue() async {
