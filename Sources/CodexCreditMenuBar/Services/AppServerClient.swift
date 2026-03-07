@@ -6,6 +6,7 @@ enum AppServerError: LocalizedError {
     case invalidResponse
     case rpc(code: Int, message: String)
     case missingResult
+    case messageTooLarge
 
     var errorDescription: String? {
         switch self {
@@ -19,6 +20,8 @@ enum AppServerError: LocalizedError {
             return "RPC error (\(code)): \(message)"
         case .missingResult:
             return "Missing result"
+        case .messageTooLarge:
+            return "App server message exceeded allowed size"
         }
     }
 }
@@ -40,6 +43,9 @@ actor AppServerClient {
 
     private var onNotification: NotificationHandler?
     private var onDisconnect: DisconnectHandler?
+
+    private static let maxIncomingBufferBytes = 2 * 1024 * 1024
+    private static let maxMessageBytes = 1 * 1024 * 1024
 
     init(command: CodexCommand) {
         self.command = command
@@ -179,6 +185,9 @@ actor AppServerClient {
 
     private func appendIncomingData(_ data: Data) async {
         incomingBuffer.append(data)
+        guard await enforceIncomingBufferLimit() else {
+            return
+        }
 
         while true {
             if let expectedBodyLength {
@@ -207,6 +216,10 @@ actor AppServerClient {
 
             let parsedLength = parseContentLength(from: header)
             if let parsedLength {
+                guard parsedLength <= Self.maxMessageBytes else {
+                    await handleOversizedMessage()
+                    return
+                }
                 expectedBodyLength = parsedLength
                 continue
             }
@@ -226,6 +239,21 @@ actor AppServerClient {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .prefix { $0.isNumber }
         return Int(digits)
+    }
+
+    private func enforceIncomingBufferLimit() async -> Bool {
+        guard incomingBuffer.count <= Self.maxIncomingBufferBytes else {
+            await handleOversizedMessage()
+            return false
+        }
+        return true
+    }
+
+    private func handleOversizedMessage() async {
+        incomingBuffer.removeAll(keepingCapacity: false)
+        expectedBodyLength = nil
+        await stop()
+        onDisconnect?(AppServerError.messageTooLarge.localizedDescription)
     }
 
     private func shouldAttemptLineDelimitedParse() -> Bool {
